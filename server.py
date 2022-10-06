@@ -1,10 +1,13 @@
-clients = []
+clients = {}
 
-import socket, ssl, re
+import socket, ssl, re, os
 from websocket_server import WebsocketServer
 import json, time
+from rethinkdb import r
 
+MESSAGES_TO_SEND = []
 WHOIS = {}
+SECRET = os.getenv("SECRET")
 
 # Called for every client connecting (after handshake)
 def new_client(client, server):
@@ -12,25 +15,47 @@ def new_client(client, server):
     server.send_message(client, """
             {"type":"godot", "method":"ping"}""")
     client["auth"] = False
-    clients.append(client)
+    client['tasks'] = []
+    clients[client['id']] = client
 
 
 # Called for every client disconnecting
 def client_left(client, server):
-    for index, client in enumerate(clients):
-        if client['id'] == client:
-            del clients[index]
+    for (item, author) in clients[client['id']]['tasks']:
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}: Your item for {item['id']} failed. (Reason: Client disconnected)")
+        client['reason'] = "disconnect"
+        client['moved_at'] = time.time()
+        r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
+        e = r.db("twitch").table("todo").get(item['id']).delete(return_changes=True).run(conn)
+        if e['errors']:
+            raise ValueError(e)
+    del clients[client['id']]
     print("Client(%d) disconnected" % client['id'])
 
 
 # Called when a client sends a message
 def message_received(client, server, message):
     msg = json.loads(message)
-    if msg["type"] ==   "ping":
+    if msg.get("auth") == SECRET:
+        clients[client['id']]['auth'] = True
+    elif msg["type"] ==   "ping":
         msg["type"] =  "godot"
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
         print(f"Client({client['id']}) sent a keep-alive")
+    elif msg["type"] == "get":
+        try:
+            item = request_item(client)
+            author, itemName = item['started_by'], item['item']
+            if itemName and author:
+                clients[client['id']]['tasks'].append((item, author))
+            server.send_message(client, itemName)
+        except SyntaxError:
+            client["handler"].send_close(1000, 'No Auth'.encode())
+    elif msg["type"] == "done":
+        item = msg["item"]
+        user = finish_item(item, client)
+        MESSAGES_TO_SEND.append(f"PRIVMSG {user} :Your job for {item} has finished.")
     print("Client(%d) said: %s" % (client['id'], message))
 
 
@@ -49,13 +74,66 @@ PORT = 6697 #port
 NICK = 'Pebbles'
 CHAN = '#twitchchat'
 
-import time
+
+# Moving claimed items to error
+conn = r.connect()
+cursor = r.db("twitch").table("todo").get_all("claims", index="status")
+for entry in cursor.run(conn):
+    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job for {entry['id']} {entry['item']} failed. (Tracker died while item was claimed)")
+    entry["moved_at"] = time.time()
+    r.db("twitch").table("error").insert(entry).run(conn)
+    r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
 
 def send_command(command, sock):
     sock.send((command + "\r\n").encode())
 
+def request_item(client):
+    conn = r.connect()
+    if not client['auth']:
+        raise SyntaxError("Bad-Auth")
+    d = list(r.db("twitch").table("todo").get_all("todo", index="status").sample(1).run(conn))
+    if len(d) == 0:
+        return {"id": "", "item": "", "started_by": ""}
+    r.db("twitch").table("todo").get(d[0]['id']).update(
+            {"status": "claims", "claimed_at": time.time()}
+    ).run(conn)
+    return d[0]
+def finish_item(item, client):
+    conn = r.connect()
+    if not client['auth']:
+        raise SyntaxError("Bad-Auth")
+    r.db("twitch").table("todo").get_all(item, index="item").update(
+        {"status": "done", "finished_at": time.time()}
+    ).run(conn)
+    return list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))[0]["author"]
+
+
+def add_to_db_2(item, author):
+    conn = r.connect()
+    if a := list(r.db("twitch").table("todo").get_all(item, index="item").run(conn)):
+        raise Exception("Item has already been run, try !status " + a[0]['id'])
+    id = r.db("twitch").table("todo").insert(
+        {"item": item, "started_by": author, "status": "todo", "queued_at": time.time()}
+    ).run(conn)['generated_keys'][0]
+    return id
+
 def start_pipeline(item):
-    return {"status": int(time.time()) % 2, "msg": "Could not add item to the queue."}
+    print("'", item, "'", sep="")
+    if not re.search(r"^\d{9}\d?$", item):
+        return {"status":False,"msg": "That doesn't look like a valid VOD ID"}
+    return {"status": True}
+
+def start_pipeline_2(item, author):
+    id = re.search(r"^https?://w?w?w?.?twitch.tv/videos/(\d+)", item)
+    if not id:
+        return {"status":False,"msg":"That doesn't look like a valid VOD URL"}
+    id = id.group(1)
+    try:
+        return {"status": True, "id": add_to_db_2(id, author)}
+    except Exception as ename:
+        return {"status": False, "msg": str(ename).split("\n")[0]}
+
+SEND_QUEUED = False
 
 with socket.create_connection((HOST, PORT)) as sock:
     with context.wrap_socket(sock, server_hostname=HOST) as ssock:
@@ -63,10 +141,19 @@ with socket.create_connection((HOST, PORT)) as sock:
         send_command(f"USER {NICK} {NICK} {NICK} {NICK}", ssock)
         send_command(f"JOIN {CHAN}", ssock)
         for line in ssock.makefile():
+            if SEND_QUEUED:
+                for message in MESSAGES_TO_SEND:
+                    send_command(message, ssock)
+                    time.sleep(0.9)
+                MESSAGES_TO_SEND = []
             print(line)
+            if "JOIN" in line:
+                send_command(f"WHOIS {CHAN}", ssock)
+                SEND_QUEUED = True # do not send privmsgs until we're connected
             data = line.split(" ")
             command = data[0]
             if command == "PING":
+                send_command(f"WHOIS {CHAN}", ssock)
                 send_command(f"PONG {data[1]}", ssock)
                 print("\t Pong!")
             if line.startswith(":"):
@@ -99,14 +186,14 @@ with socket.create_connection((HOST, PORT)) as sock:
                 time.sleep(2)
 
                 item = message.split(" ")[1]
-                if WHOIS.get(author) != "voice" and WHOIS.get(author) != "op":
-                    send_command(f"PRIVMSG {channel} :{author}: Bad priveleges (need voice or higher auth)", ssock)
-                    continue
+                #if WHOIS.get(author) != "voice" and WHOIS.get(author) != "op":
+                #    send_command(f"PRIVMSG {channel} :{author}: Bad priveleges (need voice or higher auth)", ssock)
+                #    continue
                 channel  = data[2]
-                send_command(f"PRIVMSG {channel} :{author}: Queued {item} for archival. I will ping you when finished. Use !status {item} for details.", ssock)
-                result = start_pipeline(item)
-                if not result["status"]:
-                    send_command(f"PRIVMSG {channel} :{author}: Your job for {item} failed. ({result['msg']})", ssock)
+                res = start_pipeline_2(item, author)
+                if res['status']:
+                    send_command(f"PRIVMSG {channel} :{author}: Queued {item} for chat archival. I will ping you when finished. Use !status {res['id']} for details.", ssock)
                 else:
-                    send_command(f"PRIVMSG {channel} :{author}: Your job for {item} has finished.", ssock)
+                    n = "\n"
+                    send_command(f"PRIVMSG {channel} :{author}: Your job for {item} failed. ({res['msg'].split(n)[0]})", ssock)
 
