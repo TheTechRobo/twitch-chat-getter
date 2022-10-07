@@ -8,7 +8,7 @@ assert secret
 assert os.getenv("CURL_CA_BUNDLE") == ""
 
 ws = websocket.WebSocket()
-ws.connect("ws://localhost:9001")
+ws.connect(os.environ["CONNECT"])
 ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
 ws.send(json.dumps({"type": "ping"}))
 assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
