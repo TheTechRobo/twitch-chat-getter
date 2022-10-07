@@ -15,19 +15,20 @@ def new_client(client, server):
     server.send_message(client, """
             {"type":"godot", "method":"ping"}""")
     client["auth"] = False
-    client['tasks'] = []
+    client['tasks'] = {}
     clients[client['id']] = client
 
 
 # Called for every client disconnecting
 def client_left(client, server):
-    for (item, author) in clients[client['id']]['tasks']:
-        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}: Your item for {item['id']} failed. (Reason: Client disconnected)")
+    for (item, author) in clients[client['id']]['tasks'].values():
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}: Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
         client['reason'] = "disconnect"
         client['moved_at'] = time.time()
         r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
         e = r.db("twitch").table("todo").get(item['id']).delete(return_changes=True).run(conn)
         if e['errors']:
+            MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}, TheTechRobo: Could not remove item from todo. Check logs.")
             raise ValueError(e)
     del clients[client['id']]
     print("Client(%d) disconnected" % client['id'])
@@ -38,9 +39,10 @@ def message_received(client, server, message):
     msg = json.loads(message)
     if msg.get("auth") == SECRET:
         clients[client['id']]['auth'] = True
-    elif msg["type"] ==   "ping":
+    if msg["type"] ==   "ping":
         msg["type"] =  "godot"
         msg["method"] = "ping"
+        print("Sent keep-alive")
         server.send_message(client, json.dumps(msg))
         print(f"Client({client['id']}) sent a keep-alive")
     elif msg["type"] == "get":
@@ -48,14 +50,15 @@ def message_received(client, server, message):
             item = request_item(client)
             author, itemName = item['started_by'], item['item']
             if itemName and author:
-                clients[client['id']]['tasks'].append((item, author))
+                clients[client['id']]['tasks'][item['item']] = ((item, author))
             server.send_message(client, itemName)
         except SyntaxError:
             client["handler"].send_close(1000, 'No Auth'.encode())
     elif msg["type"] == "done":
         item = msg["item"]
         user = finish_item(item, client)
-        MESSAGES_TO_SEND.append(f"PRIVMSG {user} :Your job for {item} has finished.")
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job for {item} has finished.")
+        del clients[client['id']]['tasks'][item]
     print("Client(%d) said: %s" % (client['id'], message))
 
 
@@ -79,7 +82,7 @@ CHAN = '#twitchchat'
 conn = r.connect()
 cursor = r.db("twitch").table("todo").get_all("claims", index="status")
 for entry in cursor.run(conn):
-    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job for {entry['id']} {entry['item']} failed. (Tracker died while item was claimed)")
+    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for {entry['item']} failed. (Tracker died while item was claimed)")
     entry["moved_at"] = time.time()
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
@@ -105,7 +108,7 @@ def finish_item(item, client):
     r.db("twitch").table("todo").get_all(item, index="item").update(
         {"status": "done", "finished_at": time.time()}
     ).run(conn)
-    return list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))[0]["author"]
+    return list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))[0]["started_by"]
 
 
 def add_to_db_2(item, author):
@@ -179,7 +182,7 @@ with socket.create_connection((HOST, PORT)) as sock:
                     WHOIS[user] = mode
             if command == "PRIVMSG":
                 message = data[3].lstrip(":").strip()
-                if not message.startswith("!a "):
+                if not message.startswith("!a ") and not message.startswith("!status "):
                     continue
 
                 send_command(f"NAMES {channel}", ssock)
