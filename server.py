@@ -120,6 +120,16 @@ def add_to_db_2(item, author):
     ).run(conn)['generated_keys'][0]
     return id
 
+def get_item_details(ident):
+    conn = r.connect()
+    if data := r.db("twitch").table("todo").get(ident) \
+            .run(conn):
+        return data
+    if data1 := r.db("twitch").table("error").get(ident) \
+            .run(conn):
+        data1[0]["status"] = "error"
+        return data1
+
 def start_pipeline(item):
     print("'", item, "'", sep="")
     if not re.search(r"^\d{9}\d?$", item):
@@ -183,6 +193,15 @@ with socket.create_connection((HOST, PORT)) as sock:
             if command == "PRIVMSG":
                 message = data[3].lstrip(":").strip()
                 if not message.startswith("!a ") and not message.startswith("!status "):
+                    continue
+
+                if message.startswith("!status "):
+                    id = message.split(" ")[1]
+                    data = get_item_details(id)
+                    if not data:
+                        send_command(f"PRIVMSG {channel} :{author}:That job doesn't appear to exist.", ssock)
+                        continue
+                    send_command(f"PRIVMSG {channel} :{author}: Job {id} is in {data['status']}. It scraped VOD {data['item']}. This command will provide more details later.", ssock)
                     continue
 
                 send_command(f"NAMES {channel}", ssock)
