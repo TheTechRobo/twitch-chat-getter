@@ -38,6 +38,7 @@ def client_left(client, server):
 def message_received(client, server, message):
     msg = json.loads(message)
     if msg.get("auth") == SECRET:
+        print("Secret-Auth")
         clients[client['id']]['auth'] = True
     if msg["type"] ==   "ping":
         msg["type"] =  "godot"
@@ -102,9 +103,9 @@ def request_item(client):
     ).run(conn)
     return d[0]
 def finish_item(item, client):
-    conn = r.connect()
     if not client['auth']:
         raise SyntaxError("Bad-Auth")
+    conn = r.connect()
     r.db("twitch").table("todo").get_all(item, index="item").update(
         {"status": "done", "finished_at": time.time()}
     ).run(conn)
