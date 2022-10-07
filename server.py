@@ -72,10 +72,10 @@ server.run_forever(True)
 print("Server is up and running.")
 
 context = ssl.create_default_context()
-HOST = 'irc.hackint.org' #irc server
-PORT = 6697 #port
-NICK = 'Pebbles'
-CHAN = '#twitchchat'
+HOST = os.environ['SERVER']
+PORT = int(os.environ['PORT']) #port
+NICK = os.environ['NICK']
+CHAN = os.environ['CHANNEL']
 
 
 # Moving claimed items to error
