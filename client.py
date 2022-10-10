@@ -94,6 +94,8 @@ while True:
         print("Sending finish")
         ws.send(json.dumps({"type": "done", "item": item}))
     except Exception as ename:
+        n = "\n"
+        ws.send(json.dumps({"type": "error", "item": item, "reason": f"{str(type(ename))} {str(ename).split(n)[0]} was raised!"}))
         print(type(ename), ename)
         try:
             warcprox.pid

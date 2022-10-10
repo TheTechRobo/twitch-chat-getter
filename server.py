@@ -58,10 +58,20 @@ def message_received(client, server, message):
         except SyntaxError:
             client["handler"].send_close(1000, 'No Auth'.encode())
     elif msg["type"] == "done":
+        if not client['auth']:
+            client['handler'].send_close(1000, "No Auth".encode())
+            return
         item = msg["item"]
         user = finish_item(item, client)
         MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job for {item} has finished.")
         del clients[client['id']]['tasks'][item]
+    elif msg["type"] == "error":
+        item = msg["item"]
+        try:
+            user, id = error_item(item, client, msg['reason'])
+            MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {id} for {item} on client {client['id']} failed. ({msg['reason']})")
+        except SyntaxError:
+            client['handler'].send_close(1000, "No Auth".encode())
     print("Client(%d) said: %s" % (client['id'], message))
 
 
@@ -106,6 +116,18 @@ def request_item(client):
     print("Sending", d[0], "to client")
     return d[0]
 
+def error_item(item, client, reason):
+    if not client['auth']:
+        raise SyntaxEror("Bad-Auth")
+    conn = r.connect()
+    data = list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))
+    assert len(data) == 1
+    data = data[0]
+    data['moved_at'] = time.time()
+    data['reason'] = reason
+    r.db("twitch").table("error").insert(data).run(conn)
+    return data['started_by'], data['id']
+
 def finish_item(item, client):
     if not client['auth']:
         raise SyntaxError("Bad-Auth")
@@ -133,7 +155,7 @@ def get_item_details(ident):
         return data
     if data1 := r.db("twitch").table("error").get(ident) \
             .run(conn):
-        data1[0]["status"] = "error"
+        data1["status"] = "error"
         return data1
 
 def start_pipeline(item):
@@ -229,7 +251,7 @@ with socket.create_connection((HOST, PORT)) as sock:
                             raise Exception("Job doesn't appear to exist")
                     except Exception as ename:
                         n = '\n'
-                        send_command(f"PRIVMSG {channel} :{author}: Failed to get job details for item {id}: {str(ename).split(n)[0]}", ssock)
+                        send_command(f"PRIVMSG {channel} :{author}: Failed to get job details for item {id}: {str(type(ename))} {str(ename).split(n)[0]}", ssock)
                         continue
                     send_command(f"PRIVMSG {channel} :{author}: Job {id} is in {data['status']}. It scraped VOD {data['item']}. This command will provide more details later.", ssock)
                     continue
