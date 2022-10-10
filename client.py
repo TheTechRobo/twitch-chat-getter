@@ -1,6 +1,8 @@
 
 import websocket, json, os, time, sys, subprocess, shutil, os, os.path
 import requests
+
+# TODO: Cleanup this section
 secret = os.getenv("SECRET")
 
 assert os.getenv("DATA_DIR") and os.getenv("DATA_DIR").startswith("/")
@@ -64,7 +66,7 @@ while True:
         )
         ws.send('{"type": "ping"}')
         time.sleep(5)
-        assert requests.get("http://localhost:4551").status_code == 500
+        assert requests.get("http://localhost:4551").status_code == 500 # Warcprox will respond to / with a 500
         ws.send('{"type": "ping"}')
         print("Downloading metadata")
         open_and_wait([
