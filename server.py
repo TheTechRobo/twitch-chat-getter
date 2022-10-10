@@ -178,6 +178,7 @@ SEND_QUEUED = False
 
 def reply(channel, user, message, sock):
     send_command(f"PRIVMSG {channel} :{user}: {message}", sock)
+    time.sleep(1)
 
 def get_status() -> dict[str, str]:
     conn = r.connect()
@@ -194,7 +195,7 @@ with socket.create_connection((HOST, PORT)) as sock:
             if SEND_QUEUED:
                 for message in MESSAGES_TO_SEND:
                     send_command(message, ssock)
-                    time.sleep(0.9)
+                    time.sleep(1)
                 MESSAGES_TO_SEND = []
             print(line)
             if "JOIN" in line:
