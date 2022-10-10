@@ -12,7 +12,6 @@ ws.connect(os.environ["CONNECT"])
 ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
 ws.send(json.dumps({"type": "ping"}))
 assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
-ws.recv()
 
 def open_and_wait(args, ws):
     process = subprocess.Popen(args, shell=False)
@@ -27,16 +26,23 @@ def open_and_wait(args, ws):
         assert status == 0, "Bad status code %s" % status
         break
 
-
+doNotRequestItem = False
 while True:
-    ws.send(json.dumps({"type": "get"}))
+    if not doNotRequestItem:
+        print("Requesting item")
+        ws.send(json.dumps({"type": "get"}))
     item = ws.recv()
+    print(item)
     try:
         _ = json.loads(item)
         if type(_) == dict and _.get("type") == "godot":
+            print("Skip", _)
+            doNotRequestItem = True # we already did - this is not the response to the item
             continue
+        else:
+            doNotRequestItem = False
     except json.JSONDecodeError:
-        pass
+        doNotRequestItem = False
     if not item:
         print("No items received. Trying again in 15 seconds.")
         time.sleep(15)

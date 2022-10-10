@@ -53,6 +53,8 @@ def message_received(client, server, message):
             if itemName and author:
                 clients[client['id']]['tasks'][item['item']] = ((item, author))
             server.send_message(client, itemName)
+            if itemName:
+                print("Sent", itemName, "to client")
         except SyntaxError:
             client["handler"].send_close(1000, 'No Auth'.encode())
     elif msg["type"] == "done":
@@ -83,7 +85,7 @@ CHAN = os.environ['CHANNEL']
 conn = r.connect()
 cursor = r.db("twitch").table("todo").get_all("claims", index="status")
 for entry in cursor.run(conn):
-    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for {entry['item']} failed. (Tracker died while item was claimed)")
+    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for https://twitch.tv/videos/{entry['item']} failed. (Tracker died while item was claimed)")
     entry["moved_at"] = time.time()
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
@@ -97,11 +99,14 @@ def request_item(client):
         raise SyntaxError("Bad-Auth")
     d = list(r.db("twitch").table("todo").get_all("todo", index="status").sample(1).run(conn))
     if len(d) == 0:
+        print("No items found")
         return {"id": "", "item": "", "started_by": ""}
     r.db("twitch").table("todo").get(d[0]['id']).update(
             {"status": "claims", "claimed_at": time.time()}
     ).run(conn)
+    print("Sending", d[0], "to client")
     return d[0]
+
 def finish_item(item, client):
     if not client['auth']:
         raise SyntaxError("Bad-Auth")
@@ -109,6 +114,7 @@ def finish_item(item, client):
     r.db("twitch").table("todo").get_all(item, index="item").update(
         {"status": "done", "finished_at": time.time()}
     ).run(conn)
+    print("Finished item", item)
     return list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))[0]["started_by"]
 
 
@@ -198,9 +204,14 @@ with socket.create_connection((HOST, PORT)) as sock:
 
                 if message.startswith("!status "):
                     id = message.split(" ")[1]
-                    data = get_item_details(id)
-                    if not data:
-                        send_command(f"PRIVMSG {channel} :{author}:That job doesn't appear to exist.", ssock)
+                    try:
+                        data = get_item_details(id)
+                        if not data:
+                            send_command(f"PRIVMSG {channel} :{author}: That job doesn't appear to exist.", ssock)
+                            raise Exception("Job doesn't appear to exist")
+                    except Exception as ename:
+                        n = '\n'
+                        send_command(f"PRIVMSG {channel} :{author}: Failed to get job details for item {id}: {str(ename).split(n)[0]}", ssock)
                         continue
                     send_command(f"PRIVMSG {channel} :{author}: Job {id} is in {data['status']}. It scraped VOD {data['item']}. This command will provide more details later.", ssock)
                     continue
