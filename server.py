@@ -80,7 +80,6 @@ PORT = int(os.environ['PORT']) #port
 NICK = os.environ['NICK']
 CHAN = os.environ['CHANNEL']
 
-
 # Moving claimed items to error
 conn = r.connect()
 cursor = r.db("twitch").table("todo").get_all("claims", index="status")
@@ -155,6 +154,15 @@ def start_pipeline_2(item, author):
 
 SEND_QUEUED = False
 
+def reply(channel, user, message, sock):
+    send_command(f"PRIVMSG {channel} :{user}: {message}", sock)
+
+def get_status() -> dict[str, str]:
+    conn = r.connect()
+    todo_count = r.db("twitch").table("todo").get_all("todo", index="status").count().run(conn)
+    claims_count = r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
+    return {"todo": todo_count, "claims": claims_count}
+
 with socket.create_connection((HOST, PORT)) as sock:
     with context.wrap_socket(sock, server_hostname=HOST) as ssock:
         send_command(f"NICK {NICK}", ssock)
@@ -199,6 +207,16 @@ with socket.create_connection((HOST, PORT)) as sock:
                     WHOIS[user] = mode
             if command == "PRIVMSG":
                 message = data[3].lstrip(":").strip()
+                if message == "!status":
+                    data = get_status()
+                    reply(CHAN, author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.", ssock)
+                    continue
+                if message.startswith("!help"):
+                    reply(CHAN, author, "List of commands:", ssock)
+                    reply(CHAN, author, "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)", ssock)
+                    reply(CHAN, author, "!status: Gets list of jobs in each queue.", ssock)
+                    reply(CHAN, author, "!a <URL>: Archives a twitch vod by its URL.", ssock)
+                    continue
                 if not message.startswith("!a ") and not message.startswith("!status "):
                     continue
 
