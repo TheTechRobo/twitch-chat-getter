@@ -2,8 +2,8 @@
 import websocket, json, os, time, sys, subprocess, shutil, os, os.path
 import requests
 secret = os.getenv("SECRET")
-
-assert os.getenv("DATA_DIR") and os.getenv("DATA_DIR").startswith("/")
+DATA_DIR = os.environ['DATA_DIR']
+assert DATA_DIR.startswith("/")
 assert secret
 assert os.getenv("CURL_CA_BUNDLE") == ""
 
@@ -51,9 +51,9 @@ while True:
     try:
         ws.send('{"type": "ping"}')
         print("Preparing directories for Item")
-        subprocess.run(["mkdir", "-p", os.path.join(os.environ["DATA_DIR"], item)]).check_returncode()
+        subprocess.run(["mkdir", "-p", os.path.join(DATA_DIR, item + ".tmp")]).check_returncode()
         ws.send('{"type": "ping"}')
-        os.chdir(os.path.join(os.environ["DATA_DIR"], item))
+        os.chdir(os.path.join(DATA_DIR, item + ".tmp"))
         ws.send('{"type": "ping"}')
         print("Starting warcprox for Item")
         warcprox = subprocess.Popen(
@@ -72,7 +72,7 @@ while True:
             "--write-info-json", "--write-description", "--write-thumbnail",
             "--write-all-thumbnails", "--no-check-certificate",
             "--retries", "4", "--embed-subs", "--all-subs",
-            "--limit-rate", "150k",
+            "--limit-rate", "150k", "-o", "infojson:%(id)s",
             "--proxy", "http://localhost:4551",
             "https://twitch.tv/videos/" + item
         ], ws)
@@ -90,6 +90,15 @@ while True:
         ).check_returncode()
         ws.send('{"type": "ping"}')
         warcprox.wait()
+        with open(os.path.join(DATA_DIR, item + ".tmp", f"v{item}.info.json")) as file:
+            data = json.load(file)
+            channel = data['uploader_id']
+        os.chdir(DATA_DIR)
+        subprocess.run([
+            "mkdir", "-p", os.path.join(DATA_DIR, f"{channel}")
+        ])
+        os.rename(os.path.join(DATA_DIR, item + ".tmp"), os.path.join(DATA_DIR, channel, item))
+        print("Renamed folders")
         ws.send('{"type": "ping"}')
         print("Sending finish")
         ws.send(json.dumps({"type": "done", "item": item}))
