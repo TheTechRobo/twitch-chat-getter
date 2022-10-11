@@ -89,6 +89,7 @@ HOST = os.environ['SERVER']
 PORT = int(os.environ['PORT']) #port
 NICK = os.environ['NICK']
 CHAN = os.environ['CHANNEL']
+PASSWORD = os.environ['PASSWORD']
 
 # Moving claimed items to error
 conn = r.connect()
@@ -189,8 +190,9 @@ def get_status() -> dict[str, str]:
 with socket.create_connection((HOST, PORT)) as sock:
     with context.wrap_socket(sock, server_hostname=HOST) as ssock:
         send_command(f"NICK {NICK}", ssock)
-        send_command(f"USER {NICK} {NICK} {NICK} {NICK}", ssock)
+        send_command(f"USER {NICK} {NICK} {NICK} IRC-Bot", ssock)
         send_command(f"JOIN {CHAN}", ssock)
+        MESSAGES_TO_SEND.append(f"PRIVMSG NICKSERV :IDENTIFY {NICK} {PASSWORD}")
         for line in ssock.makefile():
             if SEND_QUEUED:
                 for message in MESSAGES_TO_SEND:
