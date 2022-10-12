@@ -74,9 +74,14 @@ def message_received(client, server, message):
             client['handler'].send_close(1000, "No Auth".encode())
     print("Client(%d) said: %s" % (client['id'], message))
 
+def int_or_none(string):
+    try:
+        return int(string)
+    except ValueError:
+        pass
 
-PORT=9001
-server = WebsocketServer(port = PORT)
+PORT=int_or_none(os.getenv("WSPORT")) or 9001
+server = WebsocketServer(port=PORT)
 server.set_fn_new_client(new_client)
 server.set_fn_client_left(client_left)
 server.set_fn_message_received(message_received)

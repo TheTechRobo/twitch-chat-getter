@@ -1,4 +1,5 @@
 *.py[co]
 __pycache__/
 run.sh
+runClient.sh
 rethinkdb.log
