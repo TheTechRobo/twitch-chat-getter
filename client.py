@@ -6,6 +6,7 @@ from typing import NoReturn as Neverl
 # TODO: Cleanup this section
 secret = os.getenv("SECRET")
 DATA_DIR = os.environ['DATA_DIR']
+GQL_HEADER = os.environ['GQL_HEADER'] # go to twitch on a browser, open the network tools, find the Client-Id header in a GQL request, then profit :-)
 assert DATA_DIR.startswith("/")
 assert secret
 assert os.getenv("CURL_CA_BUNDLE") == ""
@@ -113,7 +114,31 @@ class DownloadData(TaskWithWebsocket):
         ws.send('{"type": "ping"}')
 
     def _run_channel(self, item):
-        raise NotImplementedError("lol")
+        self.warcprox = self._start_warcprox()
+        proxies = {
+                "http": "http://localhost:4551",
+                "https": "http://localhost:4551"
+        }
+        # https://stackoverflow.com/a/58054717/9654083
+        # Only retrieves the first 100 videos! Feel free to
+        # send a PR to add pagination. There needs to be a configurable
+        # limit though.
+        post_data = json.loads('[{"operationName":"FilterableVideoTower_Videos","variables":{"limit":100,"channelOwnerLogin":"%s","broadcastType":null,"videoSort":"TIME","cursor":"MTQ1"},"extensions":{"persistedQuery":{"version":1,"sha256Hash":"2023a089fca2860c46dcdeb37b2ab2b60899b52cca1bfa4e720b260216ec2dc6"}}}]' % item)
+        headers = {"Client-Id": GQL_HEADER}
+        videos = []
+        data = requests.post("https://gql.twitch.tv/gql", json=post_data, headers=headers, proxies=proxies).json()[0]['data']
+        for video in data['user']['videos']['edges']:
+            videos.append(f"https://twitch.tv/videos/{video['node']['id']}")
+
+        # we do this after getting the list so if an exception is raised
+        # we aren't sending incomplete data
+        bulk_list = requests.put(f"https://transfer.archivete.am/{item}-items", data="\n".join(videos)).text
+        self.ws.send(json.dumps({
+            "type": "feed",
+            "item": bulk_list,
+            "reason": "Automatically queued for channel {item}"
+        }))
+        return videos
 
     def _run(self, item, itemType):
         self.item = item
@@ -132,7 +157,7 @@ class DownloadData(TaskWithWebsocket):
             try:
                 self._kill_warcprox(self.warcprox)
             except Exception:
-                pass
+                print("Couldnt kill warcprox lol")
 
 class MoveFiles(Task):
     def _move_vod(self):
@@ -146,11 +171,12 @@ class MoveFiles(Task):
         os.rename(os.path.join(DATA_DIR, self.itemType + item + ".tmp"), os.path.join(DATA_DIR, channel, self.item, str(time.time())))
 
     def _move_channel(self):
+        channel = self.item
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel)
         ])
-        os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, self.item, time.time()))
+        os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, channel, str(time.time())))
 
     def run(self, item, itemType):
         self.item = item
@@ -195,6 +221,7 @@ class Pipeline:
             ws.send(json.dumps(
                 {"type": "error", "item": item, "reason": f"Caught exception: {type} {value} on {line}"}
             ))
+            time.sleep(9) # makes it less-likely the dataloss bug is triggered
             ws.close()
             raise
         print("Sending finish")

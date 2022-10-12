@@ -1,6 +1,6 @@
 clients = {}
 
-import socket, ssl, re, os
+import socket, ssl, re, requests, os
 from websocket_server import WebsocketServer
 import json, time
 from rethinkdb import r
@@ -65,10 +65,22 @@ def message_received(client, server, message):
         user = finish_item(item, client)
         MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job for {item} has finished.")
         del clients[client['id']]['tasks'][item]
+    elif msg["type"] == "feed":
+        item = msg["item"]
+        reason = msg["reason"]
+        if " " in item or not item or not reason:
+            server.send_message(client, '{"type": "failure", "method": "backfeed", "reason": "space_in_item_name"}')
+            print("Bad Backfeed", repr(item), repr(reason))
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :!a {item} {reason}")
+        start_pipeline_2w(item, NICK, reason)
     elif msg["type"] == "error":
         item = msg["item"]
         try:
-            user, id = error_item(item, client, msg['reason'])
+            d = error_item(item, client, msg['reason'])
+            if d:
+                user, id = error_item(item, client, msg['reason'])
+            else:
+                user, id = "(?)", "(?)" # will hopefully be fixed in the future
             MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {id} for {item} on client {client['id']} failed. ({msg['reason']})")
         except SyntaxError:
             client['handler'].send_close(1000, "No Auth".encode())
@@ -100,7 +112,8 @@ PASSWORD = os.environ['PASSWORD']
 conn = r.connect()
 cursor = r.db("twitch").table("todo").get_all("claims", index="status")
 for entry in cursor.run(conn):
-    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for https://twitch.tv/videos/{entry['item']} failed. (Tracker died while item was claimed)")
+    prettifiedItem = f"https://twitch.tv/{entry['item'][1:]}" if entry['item'].startswith('c') else f"https://twitch.tv/videos/{entry['item']}"
+    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for {prettifiedItem} failed. (Tracker died while item was claimed)")
     entry["moved_at"] = time.time()
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
@@ -127,11 +140,19 @@ def error_item(item, client, reason):
         raise SyntaxEror("Bad-Auth")
     conn = r.connect()
     data = list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))
-    assert len(data) == 1
+    try:
+        assert len(data) == 1, (item, client, reason, data)
+    except AssertionError:
+        # the disconnect function has probably already removed this!
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :WARNING: This item is no longer in todo! The disconnect function has probably already removed this. This may result in incomplete data being added to the database, so that data will be printed here:")
+        url = requests.put("https://transfer.archivete.am/pebbles-errlog", json={"item": item, "client": (client['id'], client['address']), "reason": reason, "time":time.time()}).text
+        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} {url}")
+        return
     data = data[0]
     data['moved_at'] = time.time()
     data['reason'] = reason
     r.db("twitch").table("error").insert(data).run(conn)
+    r.db("twitch").table("todo").get(data['id']).delete().run(conn)
     return data['started_by'], data['id']
 
 def finish_item(item, client):
@@ -145,12 +166,12 @@ def finish_item(item, client):
     return list(r.db("twitch").table("todo").get_all(item, index="item").run(conn))[0]["started_by"]
 
 
-def add_to_db_2(item, author):
+def add_to_db_2(item, author, explain):
     conn = r.connect()
     if a := list(r.db("twitch").table("todo").get_all(item, index="item").run(conn)):
         raise Exception("Item has already been run, try !status " + a[0]['id'])
     id = r.db("twitch").table("todo").insert(
-        {"item": item, "started_by": author, "status": "todo", "queued_at": time.time()}
+        {"item": item, "started_by": author, "status": "todo", "queued_at": time.time(), "explain": explain}
     ).run(conn)['generated_keys'][0]
     return id
 
@@ -164,23 +185,51 @@ def get_item_details(ident):
         data1["status"] = "error"
         return data1
 
-def start_pipeline(item):
-    print("'", item, "'", sep="")
-    if not re.search(r"^\d{9}\d?$", item):
-        return {"status":False,"msg": "That doesn't look like a valid VOD ID"}
-    return {"status": True}
-
-def start_pipeline_2(item, author):
+def start_pipeline_2(item, author, explain, use_sock=None):
+    if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", item):
+        ids = []
+        try:
+            fail = False
+            for newitem in requests.get(item).text.strip().split("\n"):
+                print("Queue", newitem)
+                d = start_pipeline_2(newitem, author, explain)
+                if d['status']:
+                    ids.append(d['id'])
+                else:
+                    ids.append(f"Item {newitem} could not be queued: {d['msg']}.")
+                    fail = True
+            url = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids)).text
+            if fail:
+                send_command(f"PRIVMSG {CHAN} :{author}: At least one item could not be queued; check {url} for more details.", ssock)
+            return {"status": True, "id": url}
+        except Exception as ename:
+            print(type(ename), repr(ename))
+            raise
+            return {"status": False, "msg": str(ename).split("\n")[0]}
     id = re.search(r"^https?://w?w?w?.?twitch.tv/videos/(\d+)", item)
+    is_channel = False
     if not id:
-        return {"status":False,"msg":"That doesn't look like a valid VOD URL"}
+        id = re.search(r"^https?://w?w?w?\.?twitch\.tv/([^/?&]+)", item)
+        is_channel = True
+        if not id:
+            return {"status":False,"msg":"That doesn't look like a valid VOD URL"}
     id = id.group(1)
+    if is_channel:
+        id = f"c{id}"
     try:
-        return {"status": True, "id": add_to_db_2(id, author)}
+        return {"status": True, "id": add_to_db_2(id, author, explain)}
     except Exception as ename:
         return {"status": False, "msg": str(ename).split("\n")[0]}
 
 SEND_QUEUED = False
+
+def start_pipeline_2w(*args, **kwargs):
+    res = start_pipeline_2(*args, **kwargs)
+    if res['status']:
+        send_command(f"PRIVMSG {channel} :{author}: Queued {item} for chat archival. I will ping you when finished. Use !status {res['id']} for details.", ssock)
+    else:
+        n = "\n"
+        send_command(f"PRIVMSG {channel} :{author}: Couldn't queue your job for {item}. ({res['msg'].split(n)[0]})", ssock)
 
 def reply(channel, user, message, sock):
     send_command(f"PRIVMSG {channel} :{user}: {message}", sock)
@@ -245,7 +294,7 @@ with socket.create_connection((HOST, PORT)) as sock:
                     reply(CHAN, author, "List of commands:", ssock)
                     reply(CHAN, author, "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)", ssock)
                     reply(CHAN, author, "!status: Gets list of jobs in each queue.", ssock)
-                    reply(CHAN, author, "!a <URL>: Archives a twitch vod by its URL.", ssock)
+                    reply(CHAN, author, "!a <URL> <EXPLANATION>: Archives a twitch vod by its URL, saving the explanation into the database.", ssock)
                     continue
                 if not message.startswith("!a ") and not message.startswith("!status "):
                     continue
@@ -264,18 +313,11 @@ with socket.create_connection((HOST, PORT)) as sock:
                     send_command(f"PRIVMSG {channel} :{author}: Job {id} is in {data['status']}. It scraped VOD {data['item']}. This command will provide more details later.", ssock)
                     continue
 
-                send_command(f"NAMES {channel}", ssock)
-                time.sleep(2)
-
                 item = message.split(" ")[1]
-                #if WHOIS.get(author) != "voice" and WHOIS.get(author) != "op":
-                #    send_command(f"PRIVMSG {channel} :{author}: Bad priveleges (need voice or higher auth)", ssock)
-                #    continue
+                try:
+                    explain = " ".join(message.split(" ")[2:])
+                except IndexError:
+                    explain = ""
                 channel  = data[2]
-                res = start_pipeline_2(item, author)
-                if res['status']:
-                    send_command(f"PRIVMSG {channel} :{author}: Queued {item} for chat archival. I will ping you when finished. Use !status {res['id']} for details.", ssock)
-                else:
-                    n = "\n"
-                    send_command(f"PRIVMSG {channel} :{author}: Your job for {item} failed. ({res['msg'].split(n)[0]})", ssock)
-
+                time.sleep(1)
+                start_pipeline_2w(item, author, explain)
