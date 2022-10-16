@@ -40,7 +40,7 @@ class Task:
         self.name = self.__class__.__name__
         self.ws = ws
 
-    def run(self, item, itemType):
+    def run(self, item, itemType, author, id):
         raise NotImplementedError("Implement the `run' method")
 
 class TaskWithWebsocket(Task):
@@ -55,7 +55,7 @@ class PrepareDirectories(Task):
 
         os.chdir(folder)
 
-    def run(self, item, itemType):
+    def run(self, item, itemType, author, id, full):
         self.item, self.itemType = item, itemType
         self.prepare_directories()
 
@@ -133,16 +133,22 @@ class DownloadData(TaskWithWebsocket):
         # we do this after getting the list so if an exception is raised
         # we aren't sending incomplete data
         bulk_list = requests.put(f"https://transfer.archivete.am/{item}-items", data="\n".join(videos)).text
+        amsg = f"(for {self.author})" if self.author else ""
         self.ws.send(json.dumps({
             "type": "feed",
             "item": bulk_list,
-            "reason": "Automatically queued for channel {item}"
+            "reason": f"Automatically queued for channel {item} {amsg}"
         }))
         return videos
 
-    def _run(self, item, itemType):
+    def _run(self, item, itemType, author, id, full):
+        self.full = full
+        self.author = author
+        self.id = id
         self.item = item
         self.itemType = itemType
+        with open("jobdata.json", "w+") as file:
+            file.write(json.dumps(self.full))
         if itemType == 'v':
             self._run_vod(item)
         elif itemType == 'c':
@@ -178,7 +184,7 @@ class MoveFiles(Task):
         ])
         os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, channel, str(time.time())))
 
-    def run(self, item, itemType):
+    def run(self, item, itemType, author, id, full):
         self.item = item
         self.itemType = itemType
 
@@ -196,7 +202,7 @@ class Pipeline:
             self.tasks.append(task(print, ws))
         print(self.tasks)
 
-    def start(self, item, ws):
+    def start(self, item, ws, author, ident, full):
         ws.send(json.dumps({"type": "ping"}))
         fullItem = item
         try:
@@ -207,7 +213,7 @@ class Pipeline:
             for task in self.tasks:
                 cls = task.__class__
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
-                task.run(item, itemType)
+                task.run(item, itemType, author, ident, full)
                 ws.send(json.dumps({"type": "ping"}))
                 print(f"Finished {cls.__name__} for item {itemType}{item}")
         except Exception:
@@ -218,14 +224,17 @@ class Pipeline:
             value = repr(data[1])
             line = data[2].tb_lineno
 
-            ws.send(json.dumps(
-                {"type": "error", "item": item, "reason": f"Caught exception: {type} {value} on {line}"}
-            ))
-            time.sleep(9) # makes it less-likely the dataloss bug is triggered
+            ws.send(json.dumps({
+                "type": "error",
+                "item": fullItem,
+                "reason": f"Caught exception: {type} {value} on {line}",
+                "id": ident,
+                "author": author
+            }))
             ws.close()
             raise
         print("Sending finish")
-        ws.send(json.dumps({"type": "done", "item": fullItem}))
+        ws.send(json.dumps({"type": "done", "item": fullItem, "id": ident}))
 
 
 doNotRequestItem = False
@@ -241,22 +250,29 @@ while True:
     if not doNotRequestItem:
         print("Requesting item")
         ws.send(json.dumps({"type": "get"}))
-    item = ws.recv()
+    full = ws.recv()
+    item = full
     print(item)
+    author = None
     try:
         _ = json.loads(item)
         if type(_) == dict:
-            if _.get("type") != "godot":
+            if _['type'] != "godot":
                 print("Skip", _)
+            if _['type'] == "item":
+                item = _['item']
+                author = _['started_by']
+                id = _['id']
+                raise KeyError("hi")
             doNotRequestItem = True # we already did - this is not the response to the item
             continue
         else:
             doNotRequestItem = False
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, KeyError):
         doNotRequestItem = False
     if not item:
         print("No items received. Trying again in 15 seconds.")
         time.sleep(15)
         continue
-    print(f"Got item {item}")
-    pipeline.start(item, ws)
+    print(f"Got item {item} for author {author}")
+    pipeline.start(item, ws, author, id, full)
