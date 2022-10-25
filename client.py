@@ -40,7 +40,7 @@ class Task:
         self.name = self.__class__.__name__
         self.ws = ws
 
-    def run(self, item, itemType, author, id):
+    def run(self, item, itemType, author, id, queued_for):
         raise NotImplementedError("Implement the `run' method")
 
 class TaskWithWebsocket(Task):
@@ -55,11 +55,11 @@ class PrepareDirectories(Task):
 
         os.chdir(folder)
 
-    def run(self, item, itemType, author, id, full):
+    def run(self, item, itemType, author, id, full, queued_for):
         self.item, self.itemType = item, itemType
         self.prepare_directories()
 
-class DownloadData(TaskWithWebsocket):
+class DownloadData(Task):
     warcprox = None
 
     def _start_warcprox(self):
@@ -134,17 +134,24 @@ class DownloadData(TaskWithWebsocket):
         # we aren't sending incomplete data
         bulk_list = requests.put(f"https://transfer.archivete.am/{item}-items", data="\n".join(videos)).text
         amsg = f"(for {self.author})" if self.author else ""
-        self.ws.send(json.dumps({
+        a = {
             "type": "feed",
             "item": bulk_list,
-            "reason": f"Automatically queued for channel {item} {amsg}"
-        }))
+            "person": self.author,
+            "reason": f"Automatically queued for channel {item} {amsg}",
+            "item_for": self.id
+        }
+        print(a)
+        print(self.id)
+        print("Done Dump...")
+        self.ws.send(json.dumps(a))
         return videos
 
-    def _run(self, item, itemType, author, id, full):
+    def _run(self, item, itemType, author, id, full, queued_for):
         self.full = full
         self.author = author
         self.id = id
+        self.queued_for = queued_for
         self.item = item
         self.itemType = itemType
         with open("jobdata.json", "w+") as file:
@@ -184,7 +191,7 @@ class MoveFiles(Task):
         ])
         os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, channel, str(time.time())))
 
-    def run(self, item, itemType, author, id, full):
+    def run(self, item, itemType, author, id, full, queued_for):
         self.item = item
         self.itemType = itemType
 
@@ -202,7 +209,7 @@ class Pipeline:
             self.tasks.append(task(print, ws))
         print(self.tasks)
 
-    def start(self, item, ws, author, ident, full):
+    def start(self, item, ws, author, ident, full, queuedFor):
         ws.send(json.dumps({"type": "ping"}))
         fullItem = item
         try:
@@ -213,7 +220,7 @@ class Pipeline:
             for task in self.tasks:
                 cls = task.__class__
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
-                task.run(item, itemType, author, ident, full)
+                task.run(item, itemType, author, ident, full, queuedFor)
                 ws.send(json.dumps({"type": "ping"}))
                 print(f"Finished {cls.__name__} for item {itemType}{item}")
         except Exception:
@@ -234,7 +241,7 @@ class Pipeline:
             ws.close()
             raise
         print("Sending finish")
-        ws.send(json.dumps({"type": "done", "item": fullItem, "id": ident}))
+        ws.send(json.dumps({"type": "done", "item": fullItem, "id": ident, "itemFor": queuedFor}))
 
 
 doNotRequestItem = False
@@ -253,26 +260,27 @@ while True:
     full = ws.recv()
     item = full
     print(item)
-    author = None
-    try:
-        _ = json.loads(item)
-        if type(_) == dict:
-            if _['type'] != "godot":
-                print("Skip", _)
-            if _['type'] == "item":
-                item = _['item']
-                author = _['started_by']
-                id = _['id']
-                raise KeyError("hi")
-            doNotRequestItem = True # we already did - this is not the response to the item
+    _ = json.loads(item)
+    if type(_) == dict:
+        if _['type'] != "godot" and _['type'] != "item":
+            print("Skip", _)
+        if _['type'] != "item":
+            doNotRequestItem = True # we already did - this is not the item
             continue
-        else:
+        if _['type'] == "item":
+
+            item = _['item']
+            if not item:
+                print("No items received. Trying again in 15 seconds.")
+                time.sleep(15)
+                continue
+            author = _['started_by']
+            id = _['id']
+            queuedFor = _.get("queued_for_item")
             doNotRequestItem = False
-    except (json.JSONDecodeError, KeyError):
-        doNotRequestItem = False
-    if not item:
-        print("No items received. Trying again in 15 seconds.")
-        time.sleep(15)
-        continue
+    else:
+        print()
+        print("Item:", item)
+        raise ValueError("Bad server version?")
     print(f"Got item {item} for author {author}")
-    pipeline.start(item, ws, author, id, full)
+    pipeline.start(item, ws, author, id, full, queuedFor)
