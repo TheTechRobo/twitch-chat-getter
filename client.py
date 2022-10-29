@@ -63,13 +63,14 @@ class DownloadData(Task):
     warcprox = None
 
     def _start_warcprox(self):
+        self.WARCPROX_PORT = "4553"
         print(f"Starting warcprox for Item {self.item}")
         warcprox = subprocess.Popen([
-            "warcprox", "-zp", "4551",
+            "warcprox", "-zp", self.WARCPROX_PORT,
             "--crawl-log-dir", "."
         ])
         time.sleep(5)
-        assert requests.get("http://localhost:4551").status_code == 500 # Warcprox will respond to / with a 500
+        assert requests.get("http://localhost:" + self.WARCPROX_PORT).status_code == 500 # Warcprox will respond to / with a 500
         print(ws)
         self.ws.send(json.dumps({"type": "ping"}))
 
@@ -101,14 +102,14 @@ class DownloadData(Task):
             "--write-all-thumbnails", "--no-check-certificate",
             "--retries", "4", "--embed-subs", "--all-subs",
             "--limit-rate", "150k", "-o", "infojson:%(id)s",
-            "--proxy", "http://localhost:4551",
+            "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
         print("Downloading chat")
         open_and_wait([
             shutil.which("chat_downloader"),
             "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
-            "--proxy", "http://localhost:4551",
+            "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
         ws.send('{"type": "ping"}')
@@ -116,8 +117,8 @@ class DownloadData(Task):
     def _run_channel(self, item):
         self.warcprox = self._start_warcprox()
         proxies = {
-                "http": "http://localhost:4551",
-                "https": "http://localhost:4551"
+                "http": "http://localhost:" + self.WARCPROX_PORT,
+                "https": "http://localhost:" + self.WARCPROX_PORT
         }
         # https://stackoverflow.com/a/58054717/9654083
         # Only retrieves the first 100 videos! Feel free to

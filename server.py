@@ -103,13 +103,16 @@ def message_received(client, server, message):
     elif msg["type"] == "error":
         item = msg["item"]
         id = msg["id"]
+        del clients[client['id']]['tasks'][item]
         try:
             d = error_item(item, id, client, msg['reason'])
             if d:
-                user, id = d
+                user, id, e, ename = d
             else:
-                user, id = "(?)", "(?)" # will hopefully be fixed in the future
+                user, id, e = "(?)", "(?)", None
             MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {id} for {item} on client {client['id']} failed. ({msg['reason']})")
+            if e:
+                MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {e} for {ename} finished with errors.")
         except SyntaxError:
             client['handler'].send_close(1000, "No Auth".encode())
     print("Client(%d) said: %s" % (client['id'], message))
@@ -129,7 +132,8 @@ def any_items_left(id, onlydone=True):
             continue
         items.append(item)
     error = list(r.db("twitch").table("error").get_all(id, index="queued_for_item").run(conn))
-    item_data = r.db("twitch").table("todo").get(id).run(conn)
+    item_data = r.db("twitch").table("todo").get(id).run(conn) \
+            or r.db("twitch").table("error").get(id).run(conn)
     return item_data['item'], items, error
 
 PORT=int_or_none(os.getenv("WSPORT")) or 9001
@@ -201,7 +205,14 @@ def error_item(item, id, client, reason):
     else:
         r.db("twitch").table("error").insert(data).run(conn)
     r.db("twitch").table("todo").get(data['id']).delete().run(conn)
-    return data['started_by'], data['id']
+    ename = None
+    a = None
+    if b := data.get("queued_for_item"):
+        _, i, e = any_items_left(id)
+        if (not i) and (not e):
+            ename = r.db("twitch").table("todo").get("queued_for_item").run(conn)
+            a = b
+    return data['started_by'], data['id'], data.get("queued_for_item"), ename
 
 def finish_item(ident, client):
     if not client['auth']:
@@ -259,7 +270,7 @@ def generate_status_message(ident) -> str:
             if ts:
                 tense = "will expire" if ts > time.time() else "expired"
                 ts = arrow.get(ts).humanize(granularity=["hour", "minute"])
-                tstext = f"Job will expire {ts}." if ts else ""
+            tstext = f"Job will expire {ts}." if ts else ""
             item_type = "VOD"
             if result['item'].startswith('c'):
                 item_type = "channel"
