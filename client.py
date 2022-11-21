@@ -1,15 +1,11 @@
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
 import requests
 
-from typing import NoReturn as Neverl
-
-# TODO: Cleanup this section
-secret = os.getenv("SECRET")
+secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
 GQL_HEADER = os.environ['GQL_HEADER'] # go to twitch on a browser, open the network tools, find the Client-Id header in a GQL request, then profit :-)
 assert DATA_DIR.startswith("/")
-assert secret
-assert os.getenv("CURL_CA_BUNDLE") == ""
+assert os.getenv("CURL_CA_BUNDLE") == "", "Set CURL_CA_BUNDLE to an empty string"
 
 ws = websocket.WebSocket()
 ws.connect(os.environ["CONNECT"])
@@ -30,7 +26,7 @@ def open_and_wait(args, ws):
             time.sleep(1)
             continue
         # Process has finished
-        assert status == 0, "Bad status code %s" % status
+        assert status == 0, f"Bad status code {status}"
         break
     atexit.unregister(kill_process)
 
@@ -40,7 +36,7 @@ class Task:
         self.name = self.__class__.__name__
         self.ws = ws
 
-    def run(self, item, itemType, author, id, queued_for):
+    def run(self, item, itemType, author, id, full, queued_for):
         raise NotImplementedError("Implement the `run' method")
 
 class TaskWithWebsocket(Task):
@@ -181,7 +177,7 @@ class MoveFiles(Task):
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
-        ])
+        ], check=True)
         os.rename(os.path.join(DATA_DIR, self.itemType + item + ".tmp"), os.path.join(DATA_DIR, channel, self.item, str(time.time())))
 
     def _move_channel(self):
@@ -189,7 +185,7 @@ class MoveFiles(Task):
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel)
-        ])
+        ], check=True)
         os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, channel, str(time.time())))
 
     def run(self, item, itemType, author, id, full, queued_for):
@@ -274,6 +270,7 @@ while True:
             if not item:
                 print("No items received. Trying again in 15 seconds.")
                 time.sleep(15)
+                doNotRequestItem = False
                 continue
             author = _['started_by']
             id = _['id']

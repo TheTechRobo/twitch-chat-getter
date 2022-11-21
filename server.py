@@ -39,7 +39,7 @@ def client_left(client, server):
             MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}, TheTechRobo: Could not remove item from todo. Check logs.")
             raise ValueError(e)
     del clients[client['id']]
-    print("Client(%d) disconnected" % client['id'])
+    print(f"Client({client['id']}) disconnected")
 
 
 # Called when a client sends a message
@@ -182,7 +182,7 @@ def request_item(client):
 
 def error_item(item, id, client, reason):
     if not client['auth']:
-        raise SyntaxEror("Bad-Auth")
+        raise SyntaxError("Bad-Auth")
     conn = r.connect()
     errored = False
     data = r.db("twitch").table("todo").get(id).run(conn)
@@ -208,7 +208,7 @@ def error_item(item, id, client, reason):
     ename = None
     a = None
     if b := data.get("queued_for_item"):
-        _, i, e = any_items_left(id)
+        _, i, e = any_items_left(data['id'])
         if (not i) and (not e):
             ename = r.db("twitch").table("todo").get("queued_for_item").run(conn)
             a = b
@@ -270,7 +270,7 @@ def generate_status_message(ident) -> str:
             if ts:
                 tense = "will expire" if ts > time.time() else "expired"
                 ts = arrow.get(ts).humanize(granularity=["hour", "minute"])
-            tstext = f"Job will expire {ts}." if ts else ""
+            tstext = f"Job {tense} {ts}." if ts else ""
             item_type = "VOD"
             if result['item'].startswith('c'):
                 item_type = "channel"
@@ -351,7 +351,7 @@ def start_pipeline_2(item, author, explain, item_for=None, use_sock=None):
         except Exception as ename:
             print(type(ename), repr(ename))
             raise
-            return {"status": False, "msg": str(ename).split("\n")[0]}
+            #return {"status": False, "msg": str(ename).split("\n")[0]}
     id = re.search(r"^https?://w?w?w?.?twitch.tv/videos/(\d+)", item)
     expires = None
     is_channel = False
@@ -390,7 +390,7 @@ def get_status() -> dict[str, str]:
     claims_count = r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
     return {"todo": todo_count, "claims": claims_count}
 
-def parse_irc_line(line: str, ssock):
+def parse_irc_line(line: str, ssock): # pylint: disable=too-many-branches
     data = line.split(" ")
     command = data[0]
     if command == "PING":
@@ -405,18 +405,18 @@ def parse_irc_line(line: str, ssock):
     author = data[0].lstrip(':').split("!")[0]
     command = data[1]
     if command == "353": # parse whois
-        data = line.split(" ")
-        channel = data[4]
-        whois = data[5:]
-        whois[0] = whois[0].lstrip(":")
-        for user in whois:
-            mode = "normal"
-            if user.startswith("@"):
-                mode = "op"
-            if user.startswith("+"):
-                mode = "voice"
-            user = user.lstrip(":+@").strip()
-            WHOIS[user] = mode
+    #    data = line.split(" ")
+    #    channel = data[4]
+    #    whois = data[5:]
+    #    whois[0] = whois[0].lstrip(":")
+    #    for user in whois:
+    #        mode = "normal"
+    #        if user.startswith("@"):
+    #            mode = "op"
+    #        if user.startswith("+"):
+    #            mode = "voice"
+    #        user = user.lstrip(":+@").strip()
+    #        WHOIS[user] = mode
         return
     if command == "PRIVMSG":
         message = data[3].lstrip(":").strip()
@@ -441,9 +441,9 @@ def parse_irc_line(line: str, ssock):
                 msg = generate_status_message(id)
                 assert len(msg) == 1
             except AssertionError:
-                send_command(f"PRIVMSG {CHAN} :{author}: An internal continuity error occured!", ssock)
+                reply(CHAN, author, "An internal continuity error occured!", ssock)
             else:
-                send_command(f"PRIVMSG {CHAN} :{author}: {msg[0]}", ssock)
+                reply(CHAN, author, msg[0], ssock)
             return
         item = message.split(" ")[1]
         try:
