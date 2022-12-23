@@ -7,12 +7,6 @@ GQL_HEADER = os.environ['GQL_HEADER'] # go to twitch on a browser, open the netw
 assert DATA_DIR.startswith("/")
 assert os.getenv("CURL_CA_BUNDLE") == "", "Set CURL_CA_BUNDLE to an empty string"
 
-ws = websocket.WebSocket()
-ws.connect(os.environ["CONNECT"])
-ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
-ws.send(json.dumps({"type": "ping"}))
-assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
-
 def open_and_wait(args, ws):
     process = subprocess.Popen(args, shell=False)
     @atexit.register
@@ -39,9 +33,6 @@ class Task:
     def run(self, item, itemType, author, id, full, queued_for):
         raise NotImplementedError("Implement the `run' method")
 
-class TaskWithWebsocket(Task):
-    pass
-
 class PrepareDirectories(Task):
     def prepare_directories(self):
         folder = os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp")
@@ -67,7 +58,6 @@ class DownloadData(Task):
         ])
         time.sleep(5)
         assert requests.get("http://localhost:" + self.WARCPROX_PORT).status_code == 500 # Warcprox will respond to / with a 500
-        print(ws)
         self.ws.send(json.dumps({"type": "ping"}))
 
         return warcprox
@@ -176,14 +166,14 @@ class DownloadData(Task):
 
 class MoveFiles(Task):
     def _move_vod(self):
-        with open(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp", f"v{item}.info.json")) as file:
+        with open(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp", f"v{self.item}.info.json")) as file:
             data = json.load(file)
             channel = data['uploader_id']
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
         ], check=True)
-        os.rename(os.path.join(DATA_DIR, self.itemType + item + ".tmp"), os.path.join(DATA_DIR, channel, self.item, str(time.time())))
+        os.rename(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp"), os.path.join(DATA_DIR, channel, self.item, str(time.time())))
 
     def _move_channel(self):
         channel = self.item
@@ -203,6 +193,7 @@ class MoveFiles(Task):
             self._move_vod()
         else:
             raise ValueError("unsupported item type")
+
 class Pipeline:
     tasks: list[Task] = []
 
@@ -248,14 +239,8 @@ class Pipeline:
 
 doNotRequestItem = False
 
-pipeline = Pipeline(
-        ws,
-        PrepareDirectories,
-        DownloadData,
-        MoveFiles
-) # later we need to do things like put warcprox in its own
-
-while True:
+def updateWS(ws):
+    global doNotRequestItem # pylint: disable=global-statement
     if not doNotRequestItem:
         print("Requesting item")
         ws.send(json.dumps({"type": "get"}))
@@ -268,15 +253,14 @@ while True:
             print("Skip", _)
         if _['type'] != "item":
             doNotRequestItem = True # we already did - this is not the item
-            continue
+            return
         if _['type'] == "item":
-
             item = _['item']
             if not item:
                 print("No items received. Trying again in 15 seconds.")
                 time.sleep(15)
                 doNotRequestItem = False
-                continue
+                return
             author = _['started_by']
             id = _['id']
             queuedFor = _.get("queued_for_item")
@@ -287,3 +271,26 @@ while True:
         raise ValueError("Bad server version?")
     print(f"Got item {item} for author {author}")
     pipeline.start(item, ws, author, id, full, queuedFor)
+
+pipeline = None
+
+def mainloop():
+    global pipeline # pylint: disable=global-statement
+
+    # init
+    ws = websocket.WebSocket()
+    ws.connect(os.environ["CONNECT"])
+    ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
+    ws.send(json.dumps({"type": "ping"}))
+    assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
+    pipeline = Pipeline(
+        ws,
+        PrepareDirectories,
+        DownloadData,
+        MoveFiles
+    ) # later we need to do things like put warcprox in its own task
+    # tini
+    while True:
+        updateWS(ws)
+
+mainloop()
