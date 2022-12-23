@@ -96,11 +96,16 @@ class DownloadData(Task):
             "yt-dlp", "--ignore-config", "--skip-download",
             "--write-info-json", "--write-description", "--write-thumbnail",
             "--write-all-thumbnails", "--no-check-certificate",
-            "--retries", "4", "--embed-subs", "--all-subs",
+            "--retries", "4",
+            # yt-dlp chat extraction is currently broken, so let's not make it crash
+            #"--embed-subs", "--all-subs",
             "--limit-rate", "150k", "-o", "infojson:%(id)s",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
+        print("Pre-emptively touching file...")
+        with open("chat.json", "w+") as file:
+            file.write("[]") # workaround for chat_downloader only writing the file when there are messages
         print("Downloading chat")
         open_and_wait([
             shutil.which("chat_downloader"),
