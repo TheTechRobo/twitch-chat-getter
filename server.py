@@ -423,7 +423,7 @@ for entry in cursor.run(conn):
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
 
-print("\n\n\n\n=======\nI'm in.=======")
+print("\n\n\n\n=======\nI'm in.\n=======")
 
 for linee in stream.iter_lines():
     print(linee)
