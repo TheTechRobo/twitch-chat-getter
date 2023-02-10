@@ -411,6 +411,7 @@ def parse_irc_line(line: dict):
         time.sleep(1)
         start_pipeline_2w(item, author, explain)
 
+print("Moving items around...")
 
 # Moving claimed items to error
 conn = r.connect()
@@ -421,6 +422,8 @@ for entry in cursor.run(conn):
     entry["moved_at"] = time.time()
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
+
+print("\n\n\n\n=======\nI'm in.=======")
 
 for linee in stream.iter_lines():
     print(linee)
