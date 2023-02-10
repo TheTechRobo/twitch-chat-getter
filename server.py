@@ -3,8 +3,6 @@ clients = {}
 import json
 import os
 import re
-import socket
-import ssl
 import time
 
 import arrow
@@ -13,7 +11,6 @@ import requests
 from websocket_server import WebsocketServer
 from rethinkdb import r
 
-MESSAGES_TO_SEND = []
 WHOIS = {}
 SECRET = os.getenv("SECRET")
 
@@ -28,15 +25,15 @@ def new_client(client, server):
 
 
 # Called for every client disconnecting
-def client_left(client, server):
+def client_left(client, _server):
     for (item, author) in clients[client['id']]['tasks'].values():
-        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}: Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
+        reply(author, f"Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
         client['reason'] = "disconnect"
         client['moved_at'] = time.time()
         r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
         e = r.db("twitch").table("todo").get(item['id']).delete(return_changes=True).run(conn)
         if e['errors']:
-            MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{author}, TheTechRobo: Could not remove item from todo. Check logs.")
+            reply(f"{author}, TheTechRobo", "Could not remove item from todo. Check logs.")
             raise ValueError(e)
     del clients[client['id']]
     print(f"Client({client['id']}) disconnected")
@@ -81,9 +78,9 @@ def message_received(client, server, message):
             otheritemname, items, errors = any_items_left(otheritem)
             if not items and not errors:
                 extra = "(with errors)" if errors else ""
-                send_command(f"PRIVMSG {CHAN} :{user}: Your job {ident} for {otheritemname} has finished {extra}.", ssock)
+                reply(user, f"Your job {ident} for {otheritemname} has finished {extra}.")
         else:
-            send_command(f"PRIVMSG {CHAN} :{user}: Your job {ident} for {item} has finished.", ssock)
+            reply(user, f"Your job {ident} for {item} has finished.")
         del clients[client['id']]['tasks'][item]
     elif msg["type"] == "feed":
         item = msg['item']
@@ -98,7 +95,7 @@ def message_received(client, server, message):
         # That way if we ever have IRCv3 message ack enabled,
         # this won't accidentally run the pipeline twice (which'll just
         # add spam to the channel).
-        send_command(f"PRIVMSG {CHAN} :​!a {item} {reason}", ssock)
+        reply(".", f"​!a {item} {reason}")
         start_pipeline_2w(item, user, reason, item_for=item_for)
     elif msg["type"] == "error":
         item = msg["item"]
@@ -110,9 +107,9 @@ def message_received(client, server, message):
                 user, id, e, ename = d
             else:
                 user, id, e = "(?)", "(?)", None
-            MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {id} for {item} on client {client['id']} failed. ({msg['reason']})")
+            reply(user, f"Your job {id} for {item} on client {client['id']} failed. ({msg['reason']})")
             if e:
-                MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{user}: Your job {e} for {ename} finished with errors.")
+                reply(user, f"Your job {e} for {ename} finished with errors.")
         except SyntaxError:
             client['handler'].send_close(1000, "No Auth".encode())
     print("Client(%d) said: %s" % (client['id'], message))
@@ -143,27 +140,14 @@ server.set_fn_client_left(client_left)
 server.set_fn_message_received(message_received)
 server.run_forever(True)
 
+print(f"Listening on port {PORT}.")
 print("Server is up and running.")
+print("Connecting to h2ibot...")
 
-context = ssl.create_default_context()
-HOST = os.environ['SERVER']
-PORT = int(os.environ['PORT']) #port
-NICK = os.environ['NICK']
-CHAN = os.environ['CHANNEL']
-PASSWORD = os.environ['PASSWORD']
+STREAM_URL = os.environ["H2IBOT_STREAM_URL"]
+POST_URL   = os.environ["H2IBOT_POST_URL"]
 
-# Moving claimed items to error
-conn = r.connect()
-cursor = r.db("twitch").table("todo").get_all("claims", index="status")
-for entry in cursor.run(conn):
-    prettifiedItem = f"https://twitch.tv/{entry['item'][1:]}" if entry['item'].startswith('c') else f"https://twitch.tv/videos/{entry['item']}"
-    MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :{entry['started_by']}: Your job {entry['id']} for {prettifiedItem} failed. (Tracker died while item was claimed)")
-    entry["moved_at"] = time.time()
-    r.db("twitch").table("error").insert(entry).run(conn)
-    r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
-
-def send_command(command, sock):
-    sock.send((command + "\r\n").encode())
+stream = requests.get(STREAM_URL, stream=True)
 
 def request_item(client):
     conn = r.connect()
@@ -190,9 +174,9 @@ def error_item(item, id, client, reason):
         data = r.db("twitch").table("todo").get(id).run(conn)
         errored = True
     if not data:
-        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} :WARNING: This item no longer appears to exist! In order to prevent data loss, here is the data the client sent.")
+        reply(":WARNING", "This item no longer appears to exist! In order to prevent data loss, here is the data the client sent.")
         url = requests.put("https://transfer.archivete.am/pebbles-errlog", json={"item": item, "client": (client['id'], client['address']), "reason": reason, "time":time.time()}).text
-        MESSAGES_TO_SEND.append(f"PRIVMSG {CHAN} {url}")
+        reply("", url)
         return
     data['moved_at'] = time.time()
     data['reason'] = reason
@@ -331,7 +315,7 @@ def get_item_details(ident) -> list[dict[str, str]]:
         results.append({"id": identifier})
     return results
 
-def start_pipeline_2(item, author, explain, item_for=None, use_sock=None):
+def start_pipeline_2(item, author, explain, item_for=None):
     if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", item):
         ids = []
         try:
@@ -346,7 +330,7 @@ def start_pipeline_2(item, author, explain, item_for=None, use_sock=None):
                     fail = True
             url = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids)).text
             if fail:
-                send_command(f"PRIVMSG {CHAN} :{author}: At least one item could not be queued; check {url} for more details.", ssock)
+                reply(author, f"At least one item could not be queued; check {url} for more details.")
             return {"status": True, "id": url}
         except Exception as ename:
             print(type(ename), repr(ename))
@@ -370,18 +354,16 @@ def start_pipeline_2(item, author, explain, item_for=None, use_sock=None):
         n = "\n"
         return {"status": False, "msg": f"{str(type(ename))} {str(ename).split(n)[0]}"}
 
-SEND_QUEUED = False
-
 def start_pipeline_2w(item, author, explain, item_for=None):
     res = start_pipeline_2(item, author, explain, item_for=item_for)
     if res['status']:
-        send_command(f"PRIVMSG {CHAN} :{author}: Queued {item} for chat archival. I will ping you when finished. Use !status {res['id']} for details.", ssock)
+        reply(author, f"Queued {item} for chat archival. I will ping you when finished. Use !status {res['id']} for details.")
     else:
         n = "\n"
-        send_command(f"PRIVMSG {CHAN} :{author}: Couldn't queue your job for {item}. ({res['msg'].split(n)[0]})", ssock)
+        reply(author, f"Couldn't queue your job for {item}. ({res['msg'].split(n)[0]})")
 
-def reply(channel, user, message, sock):
-    send_command(f"PRIVMSG {channel} :{user}: {message}", sock)
+def reply(user, message):
+    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200
     time.sleep(1)
 
 def get_status() -> dict[str, str]:
@@ -390,48 +372,23 @@ def get_status() -> dict[str, str]:
     claims_count = r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
     return {"todo": todo_count, "claims": claims_count}
 
-def parse_irc_line(line: str, ssock): # pylint: disable=too-many-branches
-    data = line.split(" ")
-    command = data[0]
-    if command == "PING":
-        send_command(f"PONG {data[1]}", ssock)
-        print("\t Pong!")
-    if line.startswith(":"):
-        if line.startswith(f":{NICK} MODE "):
-            send_command(f"JOIN {CHAN}", ssock)
-    else:
-        return
-    data = line.split(" ", 3)
-    author = data[0].lstrip(':').split("!")[0]
-    command = data[1]
-    if command == "353": # parse whois
-    #    data = line.split(" ")
-    #    channel = data[4]
-    #    whois = data[5:]
-    #    whois[0] = whois[0].lstrip(":")
-    #    for user in whois:
-    #        mode = "normal"
-    #        if user.startswith("@"):
-    #            mode = "op"
-    #        if user.startswith("+"):
-    #            mode = "voice"
-    #        user = user.lstrip(":+@").strip()
-    #        WHOIS[user] = mode
-        return
+def parse_irc_line(line: dict):
+    author = line.get("user")
+    command = line["command"]
     if command == "PRIVMSG":
-        message = data[3].lstrip(":").strip()
+        message = line["message"]
         if message == "!status":
             data = get_status()
-            reply(CHAN, author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.", ssock)
+            reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
             return
         if message.startswith("!help"):
-            reply(CHAN, author, "List of commands:", ssock)
-            reply(CHAN, author, "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)", ssock)
-            reply(CHAN, author, "!status: Gets list of jobs in each queue.", ssock)
-            reply(CHAN, author, "!a <URL> <EXPLANATION>: Archives a twitch vod or channel by its URL, saving the explanation into the database.", ssock)
-            reply(CHAN, author, "Be sure to provide explanations for your jobs, and try not to overload my servers!", ssock)
-            reply(CHAN, author, "Please note that when you archive a channel, you are only archiving the VODs.", ssock)
-            reply(CHAN, author, "Also, archiving in bulk with transfer.archivete.am URLs works. Again, though, PLEASE do not overload my servers!", ssock)
+            reply(author, "List of commands:")
+            reply(author, "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)")
+            reply(author, "!status: Gets list of jobs in each queue.")
+            reply(author, "!a <URL> <EXPLANATION>: Archives a twitch vod or channel by its URL, saving the explanation into the database.")
+            reply(author, "Be sure to provide explanations for your jobs, and try not to overload my servers!")
+            reply(author, "Please note that when you archive a channel, you are only archiving the VODs - not the clips or anything like that.")
+            reply(author, "Also, archiving in bulk with transfer.archivete.am URLs works.Again, though, PLEASE do not overload my servers!")
             return
         if not message.startswith("!a ") and not message.startswith("!status "):
             return
@@ -441,33 +398,30 @@ def parse_irc_line(line: str, ssock): # pylint: disable=too-many-branches
                 msg = generate_status_message(id)
                 assert len(msg) == 1
             except AssertionError:
-                reply(CHAN, author, "An internal continuity error occured!", ssock)
+                reply(author, "An internal continuity error occured!")
             else:
-                reply(CHAN, author, msg[0], ssock)
+                reply(author, msg[0])
             return
         item = message.split(" ")[1]
         try:
             explain = " ".join(message.split(" ")[2:])
         except IndexError:
             explain = ""
-        channel  = data[2]
+        channel = line["channel"]
         time.sleep(1)
         start_pipeline_2w(item, author, explain)
 
 
-with socket.create_connection((HOST, PORT)) as sock:
-    with context.wrap_socket(sock, server_hostname=HOST) as ssock:
-        send_command(f"NICK {NICK}", ssock)
-        send_command(f"USER {NICK} {NICK} {NICK} IRC-Bot", ssock)
-        send_command(f"JOIN {CHAN}", ssock)
-        MESSAGES_TO_SEND.append(f"PRIVMSG NICKSERV :IDENTIFY {NICK} {PASSWORD}")
-        for line in ssock.makefile():
-            if SEND_QUEUED:
-                for message in MESSAGES_TO_SEND:
-                    send_command(message, ssock)
-                    time.sleep(1)
-                MESSAGES_TO_SEND = []
-            print(line)
-            if "JOIN" in line:
-                SEND_QUEUED = True #do not send privmsgs until we're connected
-            parse_irc_line(line, ssock)
+# Moving claimed items to error
+conn = r.connect()
+cursor = r.db("twitch").table("todo").get_all("claims", index="status")
+for entry in cursor.run(conn):
+    prettifiedItem = f"https://twitch.tv/{entry['item'][1:]}" if entry['item'].startswith('c') else f"https://twitch.tv/videos/{entry['item']}"
+    reply(entry["started_by"], f"Your job {entry['id']} for {prettifiedItem} failed. (Tracker died while item was claimed)")
+    entry["moved_at"] = time.time()
+    r.db("twitch").table("error").insert(entry).run(conn)
+    r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
+
+for linee in stream.iter_lines():
+    print(linee)
+    parse_irc_line(json.loads(linee.decode("utf-8")))
