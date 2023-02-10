@@ -373,7 +373,7 @@ def get_status() -> dict[str, str]:
     return {"todo": todo_count, "claims": claims_count}
 
 def parse_irc_line(line: dict):
-    author = line.get("user")
+    author = line.get("user")["nick"]
     command = line["command"]
     if command == "PRIVMSG":
         message = line["message"]
