@@ -374,6 +374,8 @@ def get_status() -> dict[str, str]:
 
 def parse_irc_line(line: dict):
     author = line.get("user")["nick"]
+    if author == "h2ibot":
+        return # ideally we don't want to process our own messages
     command = line["command"]
     if command == "PRIVMSG":
         message = line["message"]
