@@ -379,7 +379,7 @@ def parse_irc_line(line: dict):
     command = line["command"]
     if command == "PRIVMSG":
         message = line["message"]
-        print(f"[{arrow.Arrow.fromtimestamp(message['time']).format()}] <{author}> {message}")
+        print(f"[{arrow.Arrow.fromtimestamp(line['time']).format()}] <{author}> {message}")
         if message == "!status":
             data = get_status()
             reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
