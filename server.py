@@ -379,6 +379,7 @@ def parse_irc_line(line: dict):
     command = line["command"]
     if command == "PRIVMSG":
         message = line["message"]
+        print(f"[{arrow.Arrow.fromtimestamp(message['time']).format()}] <{author}> {message}")
         if message == "!status":
             data = get_status()
             reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
@@ -428,5 +429,4 @@ for entry in cursor.run(conn):
 print("\n\n\n\n=======\nI'm in.\n=======")
 
 for linee in stream.iter_lines():
-    print(linee)
     parse_irc_line(json.loads(linee.decode("utf-8")))
