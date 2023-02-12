@@ -91,11 +91,7 @@ def message_received(client, server, message):
             server.send_message(client, '{"type": "failure", "method": "backfeed", "reason": "space_in_item_name"}')
             print("Bad Backfeed", repr(item), repr(reason))
             return
-        # The following line has a zero-width space; do not remove it.
-        # That way if we ever have IRCv3 message ack enabled,
-        # this won't accidentally run the pipeline twice (which'll just
-        # add spam to the channel).
-        reply(".", f"​!a {item} {reason}")
+        reply(".", f"!a {item} {reason}") # we ignore our own messages, so its fine
         start_pipeline_2w(item, user, reason, item_for=item_for)
     elif msg["type"] == "error":
         item = msg["item"]
