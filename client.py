@@ -1,9 +1,8 @@
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import requests
+import requests, yt_dlp, collections
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
-GQL_HEADER = os.environ['GQL_HEADER'] # go to twitch on a browser, open the network tools, find the Client-Id header in a GQL request, then profit :-)
 assert DATA_DIR.startswith("/")
 assert os.getenv("CURL_CA_BUNDLE") == "", "Set CURL_CA_BUNDLE to an empty string"
 
@@ -107,24 +106,38 @@ class DownloadData(Task):
 
     def _run_channel(self, item):
         self.warcprox = self._start_warcprox()
-        proxies = {
-                "http": "http://localhost:" + self.WARCPROX_PORT,
-                "https": "http://localhost:" + self.WARCPROX_PORT
+        proxy = "http://localhost:" + self.WARCPROX_PORT
+        options = {
+                "proxy": proxy,
+                "nocheckcertificate": True
         }
-        # https://stackoverflow.com/a/58054717/9654083
-        # Only retrieves the first 100 videos! Feel free to
-        # send a PR to add pagination. There needs to be a configurable
-        # limit though.
-        post_data = json.loads('[{"operationName":"FilterableVideoTower_Videos","variables":{"limit":100,"channelOwnerLogin":"%s","broadcastType":null,"videoSort":"TIME","cursor":"MTQ1"},"extensions":{"persistedQuery":{"version":1,"sha256Hash":"2023a089fca2860c46dcdeb37b2ab2b60899b52cca1bfa4e720b260216ec2dc6"}}}]' % item)
-        headers = {"Client-Id": GQL_HEADER}
-        videos = []
-        data = requests.post("https://gql.twitch.tv/gql", json=post_data, headers=headers, proxies=proxies).json()[0]['data']
-        for video in data['user']['videos']['edges']:
-            videos.append(f"https://twitch.tv/videos/{video['node']['id']}")
+        videos = set()
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ie = ydl.get_info_extractor("TwitchVideos")
+            q = collections.deque()
+            q.append(ie.extract("https://twitch.tv/beyondthesummit/videos"))
+            while q:
+                e = q.popleft()
+                if e['_type'] == "playlist":
+                    entries = list(e['entries'])
+                    q.extend(entries)
+                elif e['_type'] in ("url", "url_transparent"):
+                    videos.add(e['url'])
+                else:
+                    raise ValueError(f"Bad data returned by yt-dlp: {e}")
+        print(f"Discovered {len(videos)} items.")
+        if not videos:
+            raise RuntimeError("No videos found!")
 
         # we do this after getting the list so if an exception is raised
         # we aren't sending incomplete data
-        bulk_list = requests.put(f"https://transfer.archivete.am/{item}-items", data="\n".join(videos)).text
+        class DummyResponse:
+            status_code = 0
+        req = DummyResponse()
+        while req.status_code != 200:
+            req = requests.put(f"https://transfer.archivete.am/{item}-items", data="\n".join(videos))
+            print(f"Status code {req.status_code}")
+        bulk_list = req.text
         amsg = f"(for {self.author})" if self.author else ""
         a = {
             "type": "feed",
@@ -137,6 +150,7 @@ class DownloadData(Task):
         print(self.id)
         print("Done Dump...")
         self.ws.send(json.dumps(a))
+        print("Submitted videos to backfeed.")
         return videos
 
     def _run(self, item, itemType, author, id, full, queued_for):
