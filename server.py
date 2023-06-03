@@ -250,27 +250,33 @@ def generate_status_message(ident) -> str:
             if ts:
                 tense = "will expire" if ts > time.time() else "expired"
                 ts = arrow.get(ts).humanize(granularity=["hour", "minute"])
+
+            queued_ts = "Queued %s" % arrow.get(result['queued_at'])
+            finished_ts = ""
+            if fints := result.get("finished_at"):
+                finished_ts = "; finished %s" % arrow.get(fints)
+            when = f"{queued_ts}{finished_ts}."
+
             tstext = f"Job {tense} {ts}." if ts else ""
             item_type = "VOD"
             if result['item'].startswith('c'):
                 item_type = "channel"
                 item = item[1:]
             children = ""
-            if result.get("hasChildren") == "yes:alldone":
-                # it doesn't work now, so let's just return less
-                # information just to be safe (in case otherwise
-                # it'd say this when it shouldn't)
-                result['hasChildren'] = "yes"
             if result.get("hasChildren") == "yes":
                 children = " Has at least one child process. "
             elif result.get("hasChildren") == "yes:alldone":
                 children = " Has at least one child process (all done). "
             elif result.get("hasChildren") == "yes:error":
                 children = " Has at least one child process, at least one of which has failed. "
-            messages.append(f"Job {result['id']} is in {result['status']}. It scraped {item_type} {item}. {tstext}{children} This command will provide more details later.")
+            messages.append(f"Job {result['id']} is in {result['status']}. It scraped {item_type} {item}. {when} {tstext}{children} This command will provide more details later.")
     if len(messages) > 1:
-        url = requests.put("https://transfer.archivete.am/pebbles-job-status",
-            data="\n\n".join(messages)).text.replace(".am/", ".am/inline/")
+        class DummyResponse:
+            status_code = 0
+        resp = DummyResponse()
+        while resp.status_code != 200:
+            resp = requests.put("https://transfer.archivete.am/pebbles-job-status", data="\n\n".join(messages))
+        url = resp.text.replace(".am/", ".am/inline/")
         return [f"There are multiple messages, so go here: {url}"]
     assert len(messages) == 1
     return messages
@@ -294,7 +300,8 @@ def get_item_details(ident) -> list[dict[str, str]]:
                 if i['status'] == "done":
                     if not data.get("hasChildren"): # don't if there are already unfinished ones
                         data['hasChildren'] = "yes:alldone"
-                data['hasChildren'] = "yes"
+                else:
+                    data['hasChildren'] = "yes"
                 break
             for i in errors:
                 data['hasChildren'] = "yes:error"
