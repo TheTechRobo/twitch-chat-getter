@@ -1,4 +1,5 @@
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
+import hashlib
 import requests, yt_dlp, collections
 
 secret = os.environ['SECRET']
@@ -51,15 +52,18 @@ class DownloadData(Task):
     def _start_warcprox(self):
         self.WARCPROX_PORT = "4553"
         print(f"Starting warcprox for Item {self.item}")
-        warcprox = subprocess.Popen([
+        self.warcprox = subprocess.Popen([
             "warcprox", "-zp", self.WARCPROX_PORT,
             "--crawl-log-dir", "."
         ])
-        time.sleep(5)
-        assert requests.get("http://localhost:" + self.WARCPROX_PORT).status_code == 500 # Warcprox will respond to / with a 500
+        time.sleep(4)
+        file_hash = ""
+        with open(__file__, "rb") as file:
+            file_hash = hashlib.sha256(file.read()).hexdigest()
+        assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s" % file_hash).status_code == 204
         self.ws.send(json.dumps({"type": "ping"}))
 
-        return warcprox
+        return self.warcprox
 
     def _kill_warcprox(self, warcprox, signal="9"):
         print("Terminating warcprox")
@@ -79,7 +83,6 @@ class DownloadData(Task):
         ws = self.ws
 
         self.warcprox = self._start_warcprox()
-        warcprox = self.warcprox
         print("Downloading metadata")
         open_and_wait([
             "yt-dlp", "--ignore-config", "--skip-download",
@@ -115,7 +118,7 @@ class DownloadData(Task):
         with yt_dlp.YoutubeDL(options) as ydl:
             ie = ydl.get_info_extractor("TwitchVideos")
             q = collections.deque()
-            q.append(ie.extract("https://twitch.tv/beyondthesummit/videos"))
+            q.append(ie.extract("https://twitch.tv/%s/videos" % self.item))
             while q:
                 e = q.popleft()
                 if e['_type'] == "playlist":
