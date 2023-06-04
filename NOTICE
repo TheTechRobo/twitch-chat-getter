@@ -1,0 +1,3 @@
+Copyright (c) (2023) TheTechRobo.
+
+The `signal_fence` function is taken from https://stackoverflow.com/a/71330357/9654083 ; Stack Overflow content is licenced under the CC-BY-SA-4.0 licence. No changes were made, save for adding a docstring at the top of the file.
