@@ -15,8 +15,8 @@
 """
 
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import hashlib, traceback
-import requests, yt_dlp, collections
+import hashlib, traceback, signal, collections
+import requests, yt_dlp, prevent_sigint
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
@@ -24,7 +24,7 @@ assert DATA_DIR.startswith("/")
 assert os.getenv("CURL_CA_BUNDLE") == "", "Set CURL_CA_BUNDLE to an empty string"
 
 def open_and_wait(args, ws):
-    process = subprocess.Popen(args, shell=False)
+    process = subprocess.Popen(args, shell=False, preexec_fn=os.setpgrp)
     @atexit.register
     def kill_process():
         process.terminate()
@@ -36,7 +36,7 @@ def open_and_wait(args, ws):
             time.sleep(1)
             continue
         # Process has finished
-        assert status == 0, f"Bad status code {status}"
+        assert status == 0, f"Bad exit code {status}"
         break
     atexit.unregister(kill_process)
 
@@ -71,7 +71,7 @@ class DownloadData(Task):
         self.warcprox = subprocess.Popen([
             "warcprox", "-zp", self.WARCPROX_PORT,
             "--crawl-log-dir", "."
-        ])
+        ], preexec_fn=os.setpgrp)
         time.sleep(4)
         file_hash = ""
         with open(__file__, "rb") as file:
@@ -240,7 +240,7 @@ class Pipeline:
             self.tasks.append(task(print, ws))
         print(self.tasks)
 
-    def start(self, item, ws, author, ident, full, queuedFor):
+    def _start(self, item, ws, author, ident, full, queuedFor):
         ws.send(json.dumps({"type": "ping"}))
         fullItem = item
         try:
@@ -253,7 +253,7 @@ class Pipeline:
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
                 task.run(item, itemType, author, ident, full, queuedFor)
                 ws.send(json.dumps({"type": "ping"}))
-                print(f"Finished {cls.__name__} for item {itemType}{item}")
+                print(f"Finished {cls.__name__} for item {itemType}:{item}")
         except Exception:
             print("Caught exception!")
             print("Sending to server and aborting.")
@@ -273,10 +273,22 @@ class Pipeline:
                 "author": author
             }))
             ws.close()
+            print("Socket closed.")
             raise
         print("Sending finish")
         ws.send(json.dumps({"type": "done", "item": fullItem, "id": ident, "itemFor": queuedFor}))
+        print("Sent finish to the server.")
 
+    def start(self, *args, **kwargs):
+        """
+        Wrapper to _start that defers SIGINT.
+        """
+        with prevent_sigint.signal_fence(signal.SIGINT, on_deferred_signal=self._stuff):
+            return self._start(*args, **kwargs)
+
+    @staticmethod
+    def _stuff(*args, **kwargs):
+        print("Stopping when current tasks are finished...")
 
 doNotRequestItem = False
 
