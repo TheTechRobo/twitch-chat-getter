@@ -15,7 +15,7 @@
 """
 
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import hashlib
+import hashlib, traceback
 import requests, yt_dlp, collections
 
 secret = os.environ['SECRET']
@@ -146,7 +146,12 @@ class DownloadData(Task):
                     raise ValueError(f"Bad data returned by yt-dlp: {e}")
         print(f"Discovered {len(videos)} items.")
         if not videos:
+            with open("url-list", "x") as file:
+                file.write("\n")
             raise RuntimeError("No videos found!")
+
+        with open("url-list", "x") as file:
+            file.write("\n".join(videos) + "\n")
 
         # we do this after getting the list so if an exception is raised
         # we aren't sending incomplete data
@@ -252,15 +257,18 @@ class Pipeline:
         except Exception:
             print("Caught exception!")
             print("Sending to server and aborting.")
-            data = sys.exc_info()
-            type = data[0].__class__.__name__
-            value = repr(data[1])
-            line = data[2].tb_lineno
+            data = "".join(traceback.format_exception(*sys.exc_info()))
+            class Dummy:
+                status_code = 0
+            resp = Dummy()
+            while resp.status_code != 200:
+                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}")
+            url = resp.text.replace(".am/", ".am/inline/")
 
             ws.send(json.dumps({
                 "type": "error",
                 "item": fullItem,
-                "reason": f"Caught exception: {type} {value} on {line}",
+                "reason": f"Caught exception: {url}",
                 "id": ident,
                 "author": author
             }))
