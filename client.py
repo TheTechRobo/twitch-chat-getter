@@ -148,7 +148,9 @@ class DownloadData(Task):
         if not videos:
             with open("url-list", "x") as file:
                 file.write("\n")
-            raise RuntimeError("No videos found!")
+            print("WARNING: Submitting zero videos to backfeed.")
+            self.ws.send({"type":"warn","msg":"Zero videos found.","item":self.id,"person":self.author})
+            return
 
         with open("url-list", "x") as file:
             file.write("\n".join(videos) + "\n")

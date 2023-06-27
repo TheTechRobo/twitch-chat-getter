@@ -81,6 +81,14 @@ def message_received(client, server, message):
                 print("Sent", itemName, "to client")
         except SyntaxError:
             client["handler"].send_close(1000, 'No Auth'.encode())
+    elif msg["type"] == "warn":
+        if not client['auth']:
+            client['handler'].send_close(1000, "NO AUTH".encode())
+            return
+        item = msg['item']
+        person = msg['person']
+        message = msg['msg']
+        reply(person, f"A warning was emitted on item {item}: {message}")
     elif msg["type"] == "done":
         if not client['auth']:
             client['handler'].send_close(1000, "No Auth".encode())
