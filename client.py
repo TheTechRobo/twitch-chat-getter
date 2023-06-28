@@ -46,21 +46,22 @@ class Task:
         self.name = self.__class__.__name__
         self.ws = ws
 
-    def run(self, item, itemType, author, id, full, queued_for):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
         raise NotImplementedError("Implement the `run' method")
 
 class PrepareDirectories(Task):
-    def prepare_directories(self):
-        folder = os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp")
+    def prepare_directories(self, ctx):
+        folder = os.path.join(DATA_DIR, f"{self.itemType}{self.item}{time.time()}.tmp")
         subprocess.run([
             "mkdir", "-p", folder
         ]).check_returncode()
+        ctx['folder'] = folder
 
         os.chdir(folder)
 
-    def run(self, item, itemType, author, id, full, queued_for):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
         self.item, self.itemType = item, itemType
-        self.prepare_directories()
+        self.prepare_directories(ctx)
 
 class DownloadData(Task):
     warcprox = None
@@ -149,7 +150,7 @@ class DownloadData(Task):
             with open("url-list", "x") as file:
                 file.write("\n")
             print("WARNING: Submitting zero videos to backfeed.")
-            self.ws.send({"type":"warn","msg":"Zero videos found.","item":self.id,"person":self.author})
+            self.ws.send(json.dumps({"type":"warn","msg":"Zero videos found. ctx=%s" % json.dumps(self.ctx),"item":self.id,"person":self.author}))
             return
 
         with open("url-list", "x") as file:
@@ -179,7 +180,8 @@ class DownloadData(Task):
         print("Submitted videos to backfeed.")
         return videos
 
-    def _run(self, item, itemType, author, id, full, queued_for):
+    def _run(self, item, itemType, author, id, full, queued_for, ctx):
+        self.ctx = ctx
         self.full = full
         self.author = author
         self.id = id
@@ -205,7 +207,7 @@ class DownloadData(Task):
                 print("Couldnt kill warcprox lol")
 
 class MoveFiles(Task):
-    def _move_vod(self):
+    def _move_vod(self, ctx):
         with open(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp", f"v{self.item}.info.json")) as file:
             data = json.load(file)
             channel = data['uploader_id']
@@ -213,24 +215,24 @@ class MoveFiles(Task):
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
         ], check=True)
-        os.rename(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp"), os.path.join(DATA_DIR, channel, self.item, str(time.time())))
+        os.rename(ctx['folder'], os.path.join(DATA_DIR, channel, self.item, str(time.time())))
 
-    def _move_channel(self):
+    def _move_channel(self, ctx):
         channel = self.item
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel)
         ], check=True)
-        os.rename(os.path.join(DATA_DIR, f"{self.itemType}{self.item}.tmp"), os.path.join(DATA_DIR, channel, str(time.time())))
+        os.rename(ctx['folder'], os.path.join(DATA_DIR, channel, str(time.time())))
 
-    def run(self, item, itemType, author, id, full, queued_for):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
         self.item = item
         self.itemType = itemType
 
         if itemType == 'c':
-            self._move_channel()
+            self._move_channel(ctx)
         elif itemType == 'v':
-            self._move_vod()
+            self._move_vod(ctx)
         else:
             raise ValueError("unsupported item type")
 
@@ -245,6 +247,7 @@ class Pipeline:
     def _start(self, item, ws, author, ident, full, queuedFor):
         ws.send(json.dumps({"type": "ping"}))
         fullItem = item
+        ctx = {}
         try:
             itemType = 'v'
             if item.startswith('c'):
@@ -253,7 +256,7 @@ class Pipeline:
             for task in self.tasks:
                 cls = task.__class__
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
-                task.run(item, itemType, author, ident, full, queuedFor)
+                task.run(item, itemType, author, ident, full, queuedFor, ctx)
                 ws.send(json.dumps({"type": "ping"}))
                 print(f"Finished {cls.__name__} for item {itemType}:{item}")
         except Exception:
@@ -264,7 +267,7 @@ class Pipeline:
                 status_code = 0
             resp = Dummy()
             while resp.status_code != 200:
-                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}")
+                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nctx={json.dumps(ctx)}")
             url = resp.text.replace(".am/", ".am/inline/")
 
             ws.send(json.dumps({
