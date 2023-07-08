@@ -208,8 +208,8 @@ class DownloadData(Task):
 
 class MoveFiles(Task):
     def _move_vod(self, ctx):
-        with open(os.path.join(DATA_DIR, self.itemType + self.item + ".tmp", f"v{self.item}.info.json")) as file:
-            data = json.load(file)
+        with open(os.path.join(ctx['folder'], f"v{self.item}.info.json")) as f:
+            data = json.load(f)
             channel = data['uploader_id']
         os.chdir(DATA_DIR)
         subprocess.run([
