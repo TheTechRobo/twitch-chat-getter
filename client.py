@@ -103,6 +103,10 @@ class DownloadData(Task):
         print("Downloading metadata")
         open_and_wait([
             "yt-dlp", "--ignore-config", "--skip-download",
+            # Some VODs return a 403 on the m3u8, so format data
+            # will be missing on those ones since we're stifling the errors
+            # better than getting nothing, though
+            "--ignore-no-formats-error",
             "--write-info-json", "--write-description", "--write-thumbnail",
             "--write-all-thumbnails", "--no-check-certificate",
             "--retries", "4",
