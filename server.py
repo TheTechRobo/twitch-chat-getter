@@ -19,6 +19,7 @@ clients = {}
 import json
 import os
 import traceback
+import threading
 import re
 import time
 
@@ -47,17 +48,26 @@ def client_left(client, _server):
         reply(author, f"Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
         client['reason'] = "disconnect"
         client['moved_at'] = time.time()
-        r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
+        e = r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
+        if e['errors']:
+            reply("TheTechRobo", "D1F.")
+            raise ValueError(e)
         e = r.db("twitch").table("todo").get(item['id']).delete(return_changes=True).run(conn)
         if e['errors']:
             reply(f"{author}, TheTechRobo", "Could not remove item from todo. Check logs.")
             raise ValueError(e)
     del clients[client['id']]
+    if not clients:
+        CLIENTS_DISCONNECTED.set()
     print(f"Client({client['id']}) disconnected")
 
 
 # Called when a client sends a message
 def message_received(client, server, message):
+    if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
+        client['handler'].send_close(1001, b"Server going down")
+    if len(message) > 1*1024*1024: # 1 MiB
+        client['handler'].send_close(1009, b"Max msg size is 1MiB")
     try:
         msg = json.loads(message)
     except Exception:
@@ -71,7 +81,12 @@ def message_received(client, server, message):
         server.send_message(client, json.dumps(msg))
         #print(f"Client({client['id']}) sent a keep-alive")
         return
+    if not clients[client['id']]['auth']:
+        return
     elif msg["type"] == "get":
+        if STOP_FLAG.is_set():
+            message = {"type": "item", "item": "", "started_by": "", "suppl": "NO_NEW_SERVES"}
+            server.send_message(client, json.dumps(message))
         try:
             item = request_item(client)
             author, itemName = item['started_by'], item['item']
@@ -81,10 +96,10 @@ def message_received(client, server, message):
             if itemName:
                 print("Sent", itemName, "to client")
         except SyntaxError:
-            client["handler"].send_close(1000, 'No Auth'.encode())
+            client["handler"].send_close(1008, 'No Auth'.encode())
     elif msg["type"] == "warn":
         if not client['auth']:
-            client['handler'].send_close(1000, "NO AUTH".encode())
+            client['handler'].send_close(1008, "NO AUTH".encode())
             return
         item = msg['item']
         person = msg['person']
@@ -92,7 +107,7 @@ def message_received(client, server, message):
         reply(person, f"A warning was emitted on item {item}: {message}")
     elif msg["type"] == "done":
         if not client['auth']:
-            client['handler'].send_close(1000, "No Auth".encode())
+            client['handler'].send_close(1008, "No Auth".encode())
             return
         item = msg['item']
         ident = msg['id']
@@ -132,7 +147,7 @@ def message_received(client, server, message):
             if e:
                 reply(user, f"Your job {e} for {ename} finished with errors.")
         except SyntaxError:
-            client['handler'].send_close(1000, "No Auth".encode())
+            client['handler'].send_close(1008, "No Auth".encode())
     print("Client(%d) said: %s" % (client['id'], message))
 
 def int_or_none(string):
@@ -395,8 +410,7 @@ def start_pipeline_2w(item, author, explain, item_for=None):
         reply(author, f"Couldn't queue your job for {item}. ({res['msg'].split(n)[0]})")
 
 def reply(user, message):
-    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200
-    time.sleep(1)
+    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200, f"FAILED {user} {message}"
 
 def get_status() -> dict[str, str]:
     conn = r.connect()
@@ -422,8 +436,16 @@ def parse_irc_line(line: dict):
             reply(author, "!status: Gets list of jobs in each queue.")
             reply(author, "!a <URL> <EXPLANATION>: Archives a twitch vod or channel by its URL, saving the explanation into the database.")
             reply(author, "Be sure to provide explanations for your jobs, and try not to overload my servers!")
-            reply(author, "Please note that when you archive a channel, you are only archiving the VODs - not the clips or anything like that.")
+            reply(author, "Please note that when you archive a channel, you are only archiving the VODs - not the clips or anything like that. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/master/client.py#L138-L151 )")
             reply(author, "Also, archiving in bulk with transfer.archivete.am URLs works.Again, though, PLEASE do not overload my servers!")
+            return
+        if message == "!stoptasks":
+            STOP_FLAG.set()
+            reply(author, "STOP_FLAG has been set. No items will be served.")
+            return
+        if message == "!starttasks":
+            STOP_FLAG.clear()
+            reply(author, "STOP_FLAG has been cleared.")
             return
         if not message.startswith("!a ") and not message.startswith("!status "):
             return
@@ -460,5 +482,18 @@ for entry in cursor.run(conn):
 
 print("\n\n\n\n=======\nI'm in.\n=======")
 
-for linee in stream.iter_lines():
-    parse_irc_line(json.loads(linee.decode("utf-8")))
+STOP_FLAG: threading.Event = threading.Event()
+DISCONNECT_CLIENTS: threading.Event = threading.Event()
+CLIENTS_DISCONNECTED: threading.Event = threading.Event()
+
+try:
+    for linee in stream.iter_lines():
+        parse_irc_line(json.loads(linee.decode("utf-8")))
+finally:
+    reply("TheTechRobo", "The server is shutting down!")
+    reply("TheTechRobo", "Waiting for clients to disconnect.")
+    STOP_FLAG.set()
+    DISCONNECT_CLIENTS.set()
+    server.deny_new_connections(status=1001, reason=b"Server is Going down")
+    CLIENTS_DISCONNECTED.wait()
+    server.shutdown_gracefully()
