@@ -352,7 +352,7 @@ def start_pipeline_2(item, author, explain, item_for=None):
         try:
             fail = False
             for newitem in requests.get(item).text.strip().split("\n"):
-                print("Queue", newitem)
+                #print("Queue", newitem)
                 d = start_pipeline_2(newitem, author, explain, item_for=item_for)
                 if d['status']:
                     ids.append(d['id'])
@@ -375,8 +375,8 @@ def start_pipeline_2(item, author, explain, item_for=None):
         is_channel = True
         expires = int(time.time()) + 48 * 3600 # expires in 48 hours
         if not id:
-            return {"status":False,"msg":"That doesn't look like a valid VOD URL"}
-    id = id.group(1)
+            return {"status":False,"msg":"That doesn't look like a valid VOD or channel URL"}
+    id = id.group(1).lower()
     if is_channel:
         id = f"c{id}"
     try:
