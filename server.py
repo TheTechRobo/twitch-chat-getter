@@ -69,7 +69,7 @@ def message_received(client, server, message):
         msg["type"] =  "godot"
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
-        print(f"Client({client['id']}) sent a keep-alive")
+        #print(f"Client({client['id']}) sent a keep-alive")
         return
     elif msg["type"] == "get":
         try:
