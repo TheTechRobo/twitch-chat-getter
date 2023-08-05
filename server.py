@@ -235,7 +235,10 @@ def finish_item(ident, client):
 def add_to_db_2(item, author, explain, expires=None, item_for=None):
     conn = r.connect()
     if a := list(r.db("twitch").table("todo").get_all(item, index="item").run(conn)):
-        assert len(a) == 1
+        # VODs should only have ever been run once.
+        # If otherwise, fail.
+        if item[0] != 'c':
+            assert len(a) == 1
         a = a[0]
         ts = a.get("expires")
         if ts and a['status'] == "done" and ts < int(time.time()):
