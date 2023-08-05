@@ -380,7 +380,7 @@ def start_pipeline_2(item, author, explain, item_for=None):
         return {"status": True, "id": add_to_db_2(id, author, explain, expires=expires, item_for=item_for)}
     except Exception as ename:
         n = "\n"
-        traceback.print_stack()
+        traceback.print_exc()
         return {"status": False, "msg": f"{str(type(ename))} {str(ename).split(n)[0]}"}
 
 def start_pipeline_2w(item, author, explain, item_for=None):
