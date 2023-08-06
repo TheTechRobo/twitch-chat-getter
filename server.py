@@ -450,16 +450,16 @@ def parse_irc_line(line: dict):
             reply(author, "Also, archiving in bulk with transfer.archivete.am URLs works.Again, though, PLEASE do not overload my servers!")
             return
         if message == "!stoptasks":
-            if not has_mode(user, ('+', '@')):
-                reply(author, "Voice or op is required.")
-                return
+            #if not has_mode(user, ('+', '@')):
+            #    reply(author, "Voice or op is required.")
+            #    return
             STOP_FLAG.set()
             reply(author, "STOP_FLAG has been set. No items will be served.")
             return
         if message == "!starttasks":
-            if not has_mode(user, ('+', '@')):
-                reply(author, "Voice or op is required.")
-                return
+            #if not has_mode(user, ('+', '@')):
+            #    reply(author, "Voice or op is required.")
+            #    return
             STOP_FLAG.clear()
             reply(author, "STOP_FLAG has been cleared.")
             return
