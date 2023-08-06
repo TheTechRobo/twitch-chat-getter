@@ -34,6 +34,7 @@ SECRET = os.getenv("SECRET")
 
 # Called for every client connecting (after handshake)
 def new_client(client, server):
+    CLIENTS_DISCONNECTED.clear()
     print("New client connected and was given id %d" % client['id'])
     server.send_message(client, """
             {"type":"godot", "method":"ping"}""")
@@ -418,8 +419,17 @@ def get_status() -> dict[str, str]:
     claims_count = r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
     return {"todo": todo_count, "claims": claims_count}
 
+def has_mode(user, options):
+    for option in options:
+        if option in user.get("modes", ""):
+            return True
+    return False
+
+# TODO: Decorator-based command system
+
 def parse_irc_line(line: dict):
-    author = line.get("user")["nick"]
+    user = line['user']
+    author = user['nick']
     if author == "h2ibot":
         return # ideally we don't want to process our own messages
     command = line["command"]
@@ -440,10 +450,16 @@ def parse_irc_line(line: dict):
             reply(author, "Also, archiving in bulk with transfer.archivete.am URLs works.Again, though, PLEASE do not overload my servers!")
             return
         if message == "!stoptasks":
+            if not has_mode(user, ('+', '@')):
+                reply(author, "Voice or op is required.")
+                return
             STOP_FLAG.set()
             reply(author, "STOP_FLAG has been set. No items will be served.")
             return
         if message == "!starttasks":
+            if not has_mode(user, ('+', '@')):
+                reply(author, "Voice or op is required.")
+                return
             STOP_FLAG.clear()
             reply(author, "STOP_FLAG has been cleared.")
             return
@@ -485,15 +501,20 @@ print("\n\n\n\n=======\nI'm in.\n=======")
 STOP_FLAG: threading.Event = threading.Event()
 DISCONNECT_CLIENTS: threading.Event = threading.Event()
 CLIENTS_DISCONNECTED: threading.Event = threading.Event()
+CLIENTS_DISCONNECTED.set()
 
 try:
     for linee in stream.iter_lines():
         parse_irc_line(json.loads(linee.decode("utf-8")))
 finally:
-    reply("TheTechRobo", "The server is shutting down!")
-    reply("TheTechRobo", "Waiting for clients to disconnect.")
+    reply("TheTechRobo", "The server is shutting down! Signaling for clients to disconnect.")
     STOP_FLAG.set()
     DISCONNECT_CLIENTS.set()
     server.deny_new_connections(status=1001, reason=b"Server is Going down")
     CLIENTS_DISCONNECTED.wait()
-    server.shutdown_gracefully()
+    try:
+        server.shutdown_gracefully()
+    except Exception:
+        print("Exception raised.", ename)
+        server.shutdown_abruptly()
+    reply("TheTechRobo", "Server is going down NOW!")

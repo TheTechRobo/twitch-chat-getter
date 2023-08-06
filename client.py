@@ -15,7 +15,7 @@
 """
 
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import hashlib, traceback, signal, collections
+import hashlib, traceback, signal, collections, struct
 import requests, yt_dlp, prevent_sigint
 
 secret = os.environ['SECRET']
@@ -306,9 +306,21 @@ def updateWS(ws):
     if not doNotRequestItem:
         print("Requesting item")
         ws.send(json.dumps({"type": "get"}))
-    full = ws.recv()
-    item = full
-    print(item)
+    opcode, data = ws.recv_data()
+    print(data)
+    if opcode == 1:
+        # Continue
+        pass
+    elif opcode == 8:
+        # unpack status code as network-endian (big endian) unsigned short
+        code = struct.unpack("!H", data[:2])[0]
+        print("Server responded with CLOSE frame.\n"
+                "Status Code: %d\tReason: %s" % (code, data[2:].decode()))
+        print("Connection closed by remote host.")
+        sys.exit(0)
+    else:
+        raise ValueError("Unsupported opcode sent from server: %d." % opcode)
+    item = data
     _ = json.loads(item)
     if type(_) == dict:
         if _['type'] != "godot" and _['type'] != "item":
@@ -332,7 +344,7 @@ def updateWS(ws):
         print("Item:", item)
         raise ValueError("Bad server version?")
     print(f"Got item {item} for author {author}")
-    pipeline.start(item, ws, author, id, full, queuedFor)
+    pipeline.start(item, ws, author, id, data.decode("utf-8"), queuedFor)
 
 pipeline = None
 
