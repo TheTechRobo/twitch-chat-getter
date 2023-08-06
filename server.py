@@ -21,6 +21,7 @@ import os
 import traceback
 import threading
 import re
+import functools
 import time
 
 import arrow
@@ -410,8 +411,6 @@ def start_pipeline_2w(item, author, explain, item_for=None):
         n = "\n"
         reply(author, f"Couldn't queue your job for {item}. ({res['msg'].split(n)[0]})")
 
-def reply(user, message):
-    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200, f"FAILED {user} {message}"
 
 def get_status() -> dict[str, str]:
     conn = r.connect()
@@ -419,70 +418,94 @@ def get_status() -> dict[str, str]:
     claims_count = r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
     return {"todo": todo_count, "claims": claims_count}
 
-def has_mode(user, options):
-    for option in options:
-        if option in user.get("modes", ""):
-            return True
-    return False
+class Command:
+    def __init__(self: "Command", match: str, r, requiredModes, preflight):
+        self.match = match
+        self.runner = r
+        self.requiredModes = requiredModes
+        self.preflight = preflight
 
-# TODO: Decorator-based command system
+    def __call__(self: "Command", bot, user, ran, *args) -> bool:
+        """
+        Returns:
+            success(bool): False if the command did not match this function and the caller should continue searching for a working command.
+        """
+        if ran != self.match:
+            return False
+        if not self.preflight(user, ran, args):
+            return False
+        if modes := self.requiredModes:
+            success = False
+            for mode in modes:
+                if mode in user['modes']:
+                    success = True
+            if not success:
+                return False
+        self.runner(bot, user, ran, *args)
+        return True
 
-def parse_irc_line(line: dict):
-    user = line['user']
-    author = user['nick']
-    if author == "h2ibot":
-        return # ideally we don't want to process our own messages
-    command = line["command"]
-    if command == "PRIVMSG":
-        message = line["message"]
-        print(f"[{arrow.Arrow.fromtimestamp(line['time']).format()}] <{author}> {message}")
-        if message == "!status":
-            data = get_status()
-            reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
-            return
-        if message.startswith("!help"):
-            reply(author, "List of commands:")
-            reply(author, "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)")
-            reply(author, "!status: Gets list of jobs in each queue.")
-            reply(author, "!a <URL> <EXPLANATION>: Archives a twitch vod or channel by its URL, saving the explanation into the database.")
-            reply(author, "Be sure to provide explanations for your jobs, and try not to overload my servers!")
-            reply(author, "Please note that when you archive a channel, you are only archiving the VODs - not the clips or anything like that. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/master/client.py#L138-L151 )")
-            reply(author, "Also, archiving in bulk with transfer.archivete.am URLs works.Again, though, PLEASE do not overload my servers!")
-            return
-        if message == "!stoptasks":
-            #if not has_mode(user, ('+', '@')):
-            #    reply(author, "Voice or op is required.")
-            #    return
-            STOP_FLAG.set()
-            reply(author, "STOP_FLAG has been set. No items will be served.")
-            return
-        if message == "!starttasks":
-            #if not has_mode(user, ('+', '@')):
-            #    reply(author, "Voice or op is required.")
-            #    return
-            STOP_FLAG.clear()
-            reply(author, "STOP_FLAG has been cleared.")
-            return
-        if not message.startswith("!a ") and not message.startswith("!status "):
-            return
-        if message.startswith("!status "):
-            id = message.split(" ")[1]
-            try:
-                msg = generate_status_message(id)
-                assert len(msg) == 1
-            except AssertionError:
-                reply(author, "An internal continuity error occured!")
-            else:
-                reply(author, msg[0])
-            return
-        item = message.split(" ")[1]
-        try:
-            explain = " ".join(message.split(" ")[2:])
-        except IndexError:
-            explain = ""
-        channel = line["channel"]
-        time.sleep(1)
-        start_pipeline_2w(item, author, explain)
+class IrcBot:
+    """
+    IRC bot that can connect to http2irc servers.
+    """
+    def __init__(self: "IrcBot", streamUrl: str, postUrl: str):
+        """
+        Constructs the IRC bot.
+        Arguments:
+            streamUrl(str): The http2irc stream URL.
+            postUrl(str):   The http2irc message sending URL.
+        """
+        self.commands = []
+        self.streamUrl = streamUrl
+        self.postUrl = postUrl
+
+    def command(self, f=None, *, match=None, requiredModes=None, preflight=lambda _user, _ran, _args : True):
+        if f and type(f) == str:
+            return functools.partial(self.command, match=f, preflight=preflight)
+        elif f:
+            if (not match):
+                raise ValueError("match arg is required")
+            cmd = Command(match, f, requiredModes, preflight)
+            cmd.__name__ = match
+            self.commands.append(cmd)
+            return cmd
+        raise ValueError("first arg must be function or match")
+
+    def parse_irc_line(self, line: dict):
+        user = line['user']
+        author = user['nick']
+        if author == "h2ibot":
+            return # don't process our own messages
+        command = line['command']
+        if command == "PRIVMSG":
+            message = line['message']
+            args = message.split(" ")
+            print(f"[{arrow.Arrow.fromtimestamp(line['time']).format()}] <{author}> {message}")
+            for runner in self.commands:
+                if args[0] != runner.match:
+                    continue
+                if args:
+                    args_ = args[1:]
+                else:
+                    args_ = []
+                try:
+                    status = runner(self, user, args[0], *args_)
+                    if status:
+                        return
+                except Exception as ename:
+                    self.reply(author, "An error occured while processing the command")
+                    traceback.print_exc()
+
+    def run_forever(self):
+        for linee in stream.iter_lines():
+            self.parse_irc_line(json.loads(linee.decode("utf-8")))
+
+    def reply(self, user, message):
+        r = requests.post(self.postUrl, data=f"{user}: {message}")
+        assert r.status_code == 200, f"FAILED {user} {message} {r}"
+
+def reply(user, message):
+    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200, f"FAILED {user} {message}"
 
 print("Moving items around...")
 
@@ -503,9 +526,53 @@ DISCONNECT_CLIENTS: threading.Event = threading.Event()
 CLIENTS_DISCONNECTED: threading.Event = threading.Event()
 CLIENTS_DISCONNECTED.set()
 
+bot = IrcBot(STREAM_URL, POST_URL)
+
+@bot.command("!help")
+def help(self, user, ran, *args):
+    nick = user['nick']
+    text = ("List of commands:\n"
+            "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)\n"
+            "!status: Gets list of jobs in each queue.\n"
+            "!a <URL> [EXPLANATION]: Archives a twitch vod or channel by its URL, saving the explanation into the database.\n"
+            "Be sure to provide explanations for your jobs, and try not to overload my servers!\n"
+            "Please note that when you archive a channel, you are only archiving the VODs - not the clips or anything like that. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )\n"
+            "Also, archiving in bulk with transfer.archivete.am URLs works. Again, though, PLEASE do not overload my servers!")
+    for line in text.split("\n"):
+        self.reply(nick, line.strip())
+
+@bot.command("!status")
+def status(self, user, ran, job=None):
+    author = user['nick']
+    if job:
+        try:
+            msg = generate_status_message(job)
+            assert len(msg) == 1
+        except AssertionError:
+            self.reply(author, "An internal continuity error occured!")
+        else:
+            self.reply(author, msg[0])
+        return
+    data = get_status()
+    self.reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
+
+@bot.command("!stoptasks")
+def stoptasks(self, user, ran):
+    STOP_FLAG.set()
+    self.reply(author, "STOP_FLAG has been set. No items will be served.")
+
+@bot.command("!starttasks")
+def starttasks(self, user, ran):
+    STOP_FLAG.clear()
+    self.reply(author, "STOP_FLAG has been cleared.")
+
+@bot.command("!a")
+def archive(self, user, ran, item, **explain):
+    explain = " ".join(explain)
+    start_pipeline_2w(item, user['nick'], explain)
+
 try:
-    for linee in stream.iter_lines():
-        parse_irc_line(json.loads(linee.decode("utf-8")))
+    bot.run_forever()
 finally:
     reply("TheTechRobo", "The server is shutting down! Signaling for clients to disconnect.")
     STOP_FLAG.set()
