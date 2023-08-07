@@ -556,6 +556,10 @@ def status(self, user, ran, job=None):
     data = get_status()
     self.reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
 
+@bot.command("!sutats")
+def sutats(self, user, ran, job=None):
+    return status(self, user, "!status", job)
+
 @bot.command("!stoptasks")
 def stoptasks(self, user, ran):
     STOP_FLAG.set()
