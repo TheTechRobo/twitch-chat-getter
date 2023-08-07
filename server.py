@@ -501,7 +501,7 @@ class IrcBot:
         for linee in stream.iter_lines():
             self.parse_irc_line(json.loads(linee.decode("utf-8")))
 
-    def reply(self, user="To no one in particular", message):
+    def reply(self, user: str, message: str):
         startof = f"{user}:" if user else ""
         r = requests.post(self.postUrl, data=f"{startof} {message}")
         assert r.status_code == 200, f"FAILED {user} {message} {r}"
