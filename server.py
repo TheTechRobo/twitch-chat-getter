@@ -563,17 +563,17 @@ def sutats(self, user, ran, job=None):
     return status(self, user, "!status", job)
 
 @bot.command("!stoptasks")
-def stoptasks(self, user, ran):
+def stoptasks(self, user, _ran):
     STOP_FLAG.set()
-    self.reply(author, "STOP_FLAG has been set. No items will be served.")
+    self.reply(user['nick'], "STOP_FLAG has been set. No items will be served.")
 
 @bot.command("!starttasks")
-def starttasks(self, user, ran):
+def starttasks(self, user, _ran):
     STOP_FLAG.clear()
-    self.reply(author, "STOP_FLAG has been cleared.")
+    self.reply(user['nick'], "STOP_FLAG has been cleared. Items can now be served.")
 
 @bot.command("!a")
-def archive(self, user, ran, item, **explain):
+def archive(_self, user, _ran, item, **explain):
     explain = " ".join(explain)
     start_pipeline_2w(item, user['nick'], explain)
 
@@ -587,7 +587,7 @@ finally:
     CLIENTS_DISCONNECTED.wait()
     try:
         server.shutdown_gracefully()
-    except Exception:
+    except Exception as ename:
         print("Exception raised.", ename)
         server.shutdown_abruptly()
     reply("TheTechRobo", "Server is going down NOW!")
