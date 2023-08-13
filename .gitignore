@@ -5,3 +5,5 @@ runClient.sh
 runClientDebug.sh
 rethinkdb.log
 we_haul.py
+test/
+btt_upl

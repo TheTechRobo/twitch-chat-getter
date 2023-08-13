@@ -19,10 +19,19 @@ clients = {}
 import json
 import os
 import traceback
+import hashlib
 import threading
 import re
 import functools
 import time
+import shutil
+import base64
+import tempfile
+import concurrent.futures as futures
+import subprocess
+
+from glob import glob
+from pathlib import Path
 
 import arrow
 import requests
@@ -63,12 +72,54 @@ def client_left(client, _server):
         CLIENTS_DISCONNECTED.set()
     print(f"Client({client['id']}) disconnected")
 
+pool = futures.ThreadPoolExecutor(max_workers=2)
+
+def run_uploader_pipeline(uuid, dirname, chan):
+    conn = r.connect()
+    try:
+        things_to_do = (
+                ("./untarrer.zsh", "UNTARRING_UPLOAD"),
+                ("./verify_only_one.zsh", "VERIFYING_STRUCTURE"),
+                ("SET_DIRNAME_TO_SUBDIRECTORY", "UPDATING_VARS"),
+                ("./extract_urls.zsh", "EXTRACTING_URLS"),
+                ("./tarrer.zsh", "TARRING_DIRECTORY"),
+                (["./upload_to_ia.zsh", "{dirname}", chan], "UPLOADING_TO_IA")
+        )
+        for thing, status in things_to_do:
+            print(thing, status)
+            assert r.db("twitch").table("uploads").get(uuid).update({
+                "status": status
+            }).run(conn)['errors'] == 0
+            print("updated")
+            if type(thing) == str:
+                thing = [thing, dirname]
+            if thing[0] == "SET_DIRNAME_TO_SUBDIRECTORY":
+                d = list(glob(dirname + "/*"))
+                assert len(d) == 1
+                dirname = d[0]
+                continue
+            for idx, param in enumerate(thing):
+                thing[idx] = param.replace("{dirname}", dirname)
+            subprocess.run(thing, check=True)
+    except Exception as ename:
+        r.db("twitch").table("uploads").get(uuid).update({
+            "status": "FAILED"
+        }).run(conn)
+        traceback.print_exc()
+        raise
+    else:
+        assert r.db("twitch").table("uploads").get(uuid).update({
+            "status": "FINISHED",
+            "completed": True
+        }).run(conn)['errors'] == 0
+    finally:
+        conn.close()
 
 # Called when a client sends a message
 def message_received(client, server, message):
     if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
         client['handler'].send_close(1001, b"Server going down")
-    if len(message) > 1*1024*1024: # 1 MiB
+    if len(message) > 2*1024*1024: # 2 MiB
         client['handler'].send_close(1009, b"Max msg size is 1MiB")
     try:
         msg = json.loads(message)
@@ -77,15 +128,110 @@ def message_received(client, server, message):
     if msg.get("auth") == SECRET:
         print("Secret-Auth")
         clients[client['id']]['auth'] = True
+    if msg.get("auth") and msg.get("auth") != SECRET:
+        reply("TheTechRobo", "A client said the wrong password.")
     if msg["type"] ==   "ping":
         msg["type"] =  "godot"
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
-        #print(f"Client({client['id']}) sent a keep-alive")
         return
     if not clients[client['id']]['auth']:
+        # maybe they'll be delayed by thinking it's a bad connection
         return
-    elif msg["type"] == "get":
+    if msg['type'] == "negotiate":
+        result = None
+        if msg['method'] == "chunk_size":
+            result = 1*1024*1024 # 1 MiB
+        server.send_message(client, json.dumps({"type": "negotiate",
+            "result": result}))
+        return
+    if msg['type'] == "upload" and msg['method'] == "preflight":
+        if PAUSE_UPLOADS.is_set():
+            message = {"type": "nak", "reason": "Uploads manually paused"}
+            server.send_message(client, json.dumps(message))
+            return
+        # Load disk space
+        DATA_DIR = "data"
+        free_space = shutil.disk_usage(DATA_DIR).free
+        if (msg['approxSize'] * 4) > free_space:
+            message = {"type": "nak", "reason": "Free space check failed"}
+            server.send_message(client, json.dumps(message))
+            return
+        dirname = tempfile.mkdtemp(prefix="UPLOAD_TMP_", dir=DATA_DIR)
+        print(dirname)
+        conn = r.connect()
+        query_result = r.db("twitch").table("uploads").insert({
+            "status": "PREFLIGHT",
+            "completed": False,
+            "dir": dirname
+        }).run(conn)
+        if query_result['errors']:
+            message = {"type": "nak", "reason": "Database query failed"}
+            server.send_message(client, json.dumps(message))
+            return
+        clients[client['id']]['upload_uuid'] = query_result['generated_keys'][0]
+        clients[client['id']]['dirname'] = dirname
+        Path(f"{dirname}/data.tgz").touch()
+        message = {"type": "mes", "action": "start"}
+        server.send_message(client, json.dumps(message))
+        return
+    if msg['type'] == "chunk":
+        uuid = clients[client['id']]['upload_uuid']
+        conn = r.connect()
+        assert r.db("twitch").table("uploads").get(uuid).update({
+            "status": "UPLOADING"
+        }).run(conn)['errors'] == 0
+        conn.close()
+        dirname = clients[client['id']]['dirname']
+        file = f"{dirname}/data.tgz"
+        with open(file, "ab") as f:
+            f.write(base64.b85decode(msg['data']))
+        message = {"type": "upload_ack", "num": msg['num']}
+        server.send_message(client, json.dumps(message))
+        return
+    if msg['type'] == "fin":
+        uuid = clients[client['id']]['upload_uuid']
+        conn = r.connect()
+        assert r.db("twitch").table("uploads").get(uuid).update({
+            "status": "WAITING"
+        }).run(conn)
+        conn.close()
+        # Start upload pipeline
+        dirname = clients[client['id']]['dirname']
+        chan = msg['chan']
+        pool.submit(run_uploader_pipeline, uuid, dirname, chan)
+        # Confirm to client that item has started
+        message = {"type": "fin_ack"}
+        server.send_message(client, json.dumps(message))
+    if msg['type'] == "verify":
+        dirname = clients[client['id']]['dirname']
+        file = f"{dirname}/data.tgz"
+        # read up to 8MiB at a time
+        buffer_size = 16*1024*1024
+        has = msg['hash']
+        if has['type'] != "sha256":
+            message = {"type": "verify_result", "res": "nosupportedhash"}
+            server.send_message(client, json.dumps(message))
+            return
+        payload = has['payload']
+        sha = hashlib.sha256()
+        with open(file, "rb") as f:
+            while data := f.read(buffer_size):
+                sha.update(data)
+        if sha.hexdigest() == payload:
+            message = {"type": "verify_result", "res": "match"}
+        else:
+            message = {"type": "verify_result", "res": "mismatch"}
+        server.send_message(client, json.dumps(message))
+        return
+    if msg['type'] == "upload_satuts":
+        uuid = clients[client['id']]['upload_uuid']
+        conn = r.connect()
+        response = r.db("twitch").table("uploads").get(uuid).run(conn)
+        message = {"type": "upload_status", "status": response['status']}
+        server.send_message(client, json.dumps(message))
+        return
+    if msg["type"] == "get":
         if STOP_FLAG.is_set():
             message = {"type": "item", "item": "", "started_by": "", "suppl": "NO_NEW_SERVES"}
             server.send_message(client, json.dumps(message))
@@ -502,12 +648,13 @@ class IrcBot:
             self.parse_irc_line(json.loads(linee.decode("utf-8")))
 
     def reply(self, user: str, message: str):
-        startof = f"{user}:" if user else ""
-        r = requests.post(self.postUrl, data=f"{startof} {message}")
+        startof = f"{user}: " if user else ""
+        r = requests.post(self.postUrl, data=f"{startof}{message}")
         assert r.status_code == 200, f"FAILED {user} {message} {r}"
 
 def reply(user, message):
-    assert requests.post(POST_URL, data=f"{user}: {message}").status_code == 200, f"FAILED {user} {message}"
+    startof = f"{user}: " if user else ""
+    assert requests.post(POST_URL, data=f"{startof}{message}").status_code == 200, f"FAILED {user} {message}"
 
 print("Moving items around...")
 
@@ -521,12 +668,28 @@ for entry in cursor.run(conn):
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
 
+cursor = r.db("twitch").table("uploads").get_all(False, index="completed")
+
+for item in cursor.run(conn):
+    reply(None, f"Cleaning up unfinished upload {item['id']}.")
+    try:
+        shutil.rmtree(item['dir'])
+    except FileNotFoundError:
+        reply(None, f"job upload {item['dir']} no longer exists..")
+    assert r.db("twitch").table("uploads").get(item['id']).update({
+        "PRE_MOVE_status": item['status'],
+        "status": "FAILED",
+        "completed": None,
+        "reason": "Tracker died while completed was false"
+    }).run(conn)['errors'] == 0
+
 print("\n\n\n\n=======\nI'm in.\n=======")
 
 STOP_FLAG: threading.Event = threading.Event()
 DISCONNECT_CLIENTS: threading.Event = threading.Event()
 CLIENTS_DISCONNECTED: threading.Event = threading.Event()
 CLIENTS_DISCONNECTED.set()
+PAUSE_UPLOADS: threading.Event = threading.Event()
 
 bot = IrcBot(STREAM_URL, POST_URL)
 
@@ -576,6 +739,16 @@ def starttasks(self, user, _ran):
 def archive(_self, user, _ran, item, **explain):
     explain = " ".join(explain)
     start_pipeline_2w(item, user['nick'], explain)
+
+@bot.command("!stopuploads")
+def stopuploads(self, _user, _ran):
+    PAUSE_UPLOADS.set()
+    self.reply(_user['nick'], "Paused uploads")
+
+@bot.command("!startuploads")
+def startuploads(self, _user, _ran):
+    PAUSE_UPLOADS.clear()
+    self.reply(_user['nick'], "Resumed uploads")
 
 try:
     bot.run_forever()

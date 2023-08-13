@@ -15,8 +15,10 @@
 """
 
 import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import hashlib, traceback, signal, collections, struct
+import hashlib, traceback, signal, collections, struct, hashlib, base64
 import requests, yt_dlp, prevent_sigint
+
+from subprocess import PIPE
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
@@ -154,7 +156,7 @@ class DownloadData(Task):
             with open("url-list", "x") as file:
                 file.write("\n")
             print("WARNING: Submitting zero videos to backfeed.")
-            self.ws.send(json.dumps({"type":"warn","msg":"Zero videos found. ctx=%s" % json.dumps(self.ctx),"item":self.id,"person":self.author}))
+            self.ws.send(json.dumps({"type":"warn","msg":"Zero videos found.","item":self.id,"person":self.author}))
             return
 
         with open("url-list", "x") as file:
@@ -219,7 +221,12 @@ class MoveFiles(Task):
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
         ], check=True)
-        os.rename(ctx['folder'], os.path.join(DATA_DIR, channel, self.item, str(time.time())))
+        newrpath = os.path.join(channel, self.item, str(time.time()))
+        newpath = os.path.join(DATA_DIR, newrpath)
+        os.rename(ctx['folder'], newpath)
+        ctx['final_relative_path'] = newrpath
+        ctx['final_path'] = newpath
+        ctx['channel'] = channel
 
     def _move_channel(self, ctx):
         channel = self.item
@@ -227,7 +234,12 @@ class MoveFiles(Task):
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel)
         ], check=True)
-        os.rename(ctx['folder'], os.path.join(DATA_DIR, channel, str(time.time())))
+        new_relative_path = os.path.join(channel, str(time.time()))
+        new_path = os.path.join(DATA_DIR, new_relative_path)
+        os.rename(ctx['folder'], new_path)
+        ctx['final_relative_path'] = new_relative_path
+        ctx['final_path'] = new_path
+        ctx['channel'] = channel
 
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         self.item = item
@@ -239,6 +251,135 @@ class MoveFiles(Task):
             self._move_vod(ctx)
         else:
             raise ValueError("unsupported item type")
+
+def get_next_message(webSocket, wanted_type=None):
+    data = {"type": "godot"}
+    while data['type'] == "godot":
+        opcode, data = webSocket.recv_data()
+        if opcode == 1:
+            data = json.loads(data)
+        elif opcode == 8:
+            print("Server unexpectedly closed the conection.\nResponse: %s" % data)
+            sys.exit(4)
+        else:
+            print("Unknown opcode.\nData:" % [opcode, data])
+            sys.exit(5)
+    if wanted_type:
+        assert data['type'] == wanted_type
+    return data
+
+
+# TODO: Move this into another file
+# Source: https://stackoverflow.com/a/55648984/9654083
+def du(path):
+    if os.path.islink(path):
+        return (os.lstat(path).st_size, 0)
+    if os.path.isfile(path):
+        st = os.lstat(path)
+        return (st.st_size, st.st_blocks * 512)
+    apparent_total_bytes = 0
+    total_bytes = 0
+    have = []
+    for dirpath, dirnames, filenames in os.walk(path):
+        apparent_total_bytes += os.lstat(dirpath).st_size
+        total_bytes += os.lstat(dirpath).st_blocks * 512
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.islink(fp):
+                apparent_total_bytes += os.lstat(fp).st_size
+                continue
+            st = os.lstat(fp)
+            if st.st_ino in have:
+                continue  # skip hardlinks which were already counted
+            have.append(st.st_ino)
+            apparent_total_bytes += st.st_size
+            total_bytes += st.st_blocks * 512
+        for d in dirnames:
+            dp = os.path.join(dirpath, d)
+            if os.path.islink(dp):
+                apparent_total_bytes += os.lstat(dp).st_size
+    return (apparent_total_bytes, total_bytes)
+
+class UploadData(Task):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
+        ws = self.ws
+        path = ctx['final_path']
+
+        sha = hashlib.sha256()
+
+        ws.send(json.dumps({"type": "negotiate", "method": "chunk_size"}))
+        chunk_response = get_next_message(ws, "negotiate")
+        # Maximum 2 MiB
+        chunk_size = max(chunk_response['result'], 2*1024*1024)
+        # Start takeoff
+        preflight_response = {"type":None}
+        while preflight_response['type'] != "mes":
+            ws.send(json.dumps({"type": "upload", "method": "preflight",
+                "approxSize": du(path)[1]}))
+            preflight_response = get_next_message(ws)
+            assert preflight_response['type'] in ("mes", "nak")
+            if preflight_response['type'] == "mes":
+                break
+            print("Tracker is not ready to upload content.\n%s"
+                  % preflight_response)
+            print("Sleeping 30 seconds.")
+            time.sleep(30)
+
+        data = subprocess.Popen(
+            ["tar", "-C", DATA_DIR, "-czv", ctx['final_relative_path']],
+            shell=False,
+            stdout=subprocess.PIPE
+        )
+        chunk_num = 0
+        while chunk := data.stdout.read(chunk_size):
+            sha.update(chunk)
+            status = None
+            encoded = base64.b85encode(chunk).decode("ascii")
+            while status != "successful":
+                ws.send(json.dumps({"type": "chunk", "data": encoded,
+                                    "size": chunk_size, "num": chunk_num}))
+                msg = get_next_message(ws)
+                assert msg['type'] in ("upload_ack", "upload_nak")
+                if msg['type'] == "upload_nak":
+                    status = "nak'd"
+                    print("NAK received. The server cannot handle this chunk."
+                         " Retrying in 30 seconds...")
+                    time.sleep(30)
+                elif msg['type'] == "upload_ack":
+                    assert msg['num'] == chunk_num
+                    status = "successful"
+                else:
+                    print("Unrecognised server response.\n%s" % msg)
+            chunk_num += 1
+        print("Submitted ALL data.")
+        ws.send(json.dumps({"type": "fin", "chan": ctx['channel']}))
+        get_next_message(ws, "fin_ack")
+
+        sha = sha.hexdigest()
+        print("Hash:", sha)
+        ws.send(json.dumps({"type": "verify", "hash": {
+            "type": "sha256",
+            "payload": sha
+        }}))
+        # TODO: Properly retry this
+        assert get_next_message(ws, "verify_result")['res'] == "match"
+        print("Hash verified.")
+
+        current_status = None
+        while current_status != "FINISHED":
+            if current_status == "FAILED":
+                raise Exception("Upload FAILED according to server..")
+            ws.send(json.dumps({
+                "type": "upload_satuts"
+            }))
+            d = get_next_message(ws, "upload_status")
+            if d['status'] != current_status:
+                current_status = d['status']
+                print(f"Item entered {current_status.upper()} status.")
+            ws.send(json.dumps({"type": "ping"}))
+            time.sleep(4)
+
+        print("Upload confirmed on IA!")
 
 class Pipeline:
     tasks: list[Task] = []
@@ -324,14 +465,24 @@ def updateWS(ws):
     _ = json.loads(item)
     if type(_) == dict:
         if _['type'] != "godot" and _['type'] != "item":
-            print("Skip", _)
+            raise ValueError(f"Unexpected type {_}")
         if _['type'] != "item":
             doNotRequestItem = True # we already did - this is not the item
             return
         if _['type'] == "item":
             item = _['item']
             if not item:
-                print("No items received. Trying again in 15 seconds.")
+                message = "No items received."
+                if suppl := _.get("suppl"):
+                    if suppl == "NO_NEW_SERVES":
+                        message = "Items are not currently being served."
+                    elif suppl == "RATE_LIMITING":
+                        message = "Tracker ratelimiting is active. In order not to overload Twitch, we've limited the speed of item serves."
+                    elif suppl == "ERROR":
+                        message = "Tracker experienced an internal error."
+                    else:
+                        message = f"Server returned status {suppl}."
+                print(f"{message} Trying again in 15 seconds.")
                 time.sleep(15)
                 doNotRequestItem = False
                 return
@@ -354,6 +505,7 @@ def mainloop():
     # init
     ws = websocket.WebSocket()
     ws.connect(os.environ["CONNECT"])
+    ws.send(json.dumps({"type": "afternoon"}))
     ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
     ws.send(json.dumps({"type": "ping"}))
     assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
@@ -361,7 +513,8 @@ def mainloop():
         ws,
         PrepareDirectories,
         DownloadData,
-        MoveFiles
+        MoveFiles,
+        UploadData
     ) # later we need to do things like put warcprox in its own task
     # tini
     while True:
