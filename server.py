@@ -534,11 +534,11 @@ def start_pipeline_2(item, author, explain, item_for=None):
     expires = None
     is_channel = False
     if not id:
-        id = re.search(r"^https?://w?w?w?\.?twitch\.tv/([^/?&]+)", item)
+        id = re.search(r"^https?://w?w?w?\.?twitch\.tv/([\w]+)", item)
         is_channel = True
         expires = int(time.time()) + 48 * 3600 # expires in 48 hours
         if not id:
-            return {"status":False,"msg":"That doesn't look like a valid VOD or channel URL"}
+            return {"status":False,"msg":"That doesn't look like a valid VOD or channel URL (if this is a bug, file an issue or contact T.heTechRobo)"}
     id = id.group(1).lower()
     if is_channel:
         id = f"c{id}"
