@@ -736,7 +736,7 @@ def starttasks(self, user, _ran):
     self.reply(user['nick'], "STOP_FLAG has been cleared. Items can now be served.")
 
 @bot.command("!a")
-def archive(_self, user, _ran, item, **explain):
+def archive(_self, user, _ran, item, *explain):
     explain = " ".join(explain)
     start_pipeline_2w(item, user['nick'], explain)
 
