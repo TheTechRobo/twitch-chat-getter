@@ -119,7 +119,7 @@ def run_uploader_pipeline(uuid, dirname, chan):
 def message_received(client, server, message):
     if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
         client['handler'].send_close(1001, b"Server going down")
-    if len(message) > 2*1024*1024: # 2 MiB
+    if len(message) > 4*1024*1024: # 2 MiB
         client['handler'].send_close(1009, b"Max msg size is 1MiB")
     try:
         msg = json.loads(message)
