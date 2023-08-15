@@ -29,6 +29,9 @@ import base64
 import tempfile
 import concurrent.futures as futures
 import subprocess
+import random
+
+from itertools import permutations
 
 from glob import glob
 from pathlib import Path
@@ -576,8 +579,17 @@ class Command:
         Returns:
             success(bool): False if the command did not match this function and the caller should continue searching for a working command.
         """
-        if ran != self.match:
-            return False
+        if type(self.match) == set:
+            none = True
+            for match in self.match:
+                if ran == match:
+                    none = False
+                    break
+            if none:
+                return False
+        else:
+            if ran != self.match:
+                return False
         if not self.preflight(user, ran, args):
             return False
         if modes := self.requiredModes:
@@ -606,7 +618,7 @@ class IrcBot:
         self.postUrl = postUrl
 
     def command(self, f=None, *, match=None, requiredModes=None, preflight=lambda _user, _ran, _args : True):
-        if f and type(f) == str:
+        if f and (type(f) == str or type(f) == set):
             return functools.partial(self.command, match=f, preflight=preflight)
         elif f:
             if (not match):
@@ -628,8 +640,15 @@ class IrcBot:
             args = message.split(" ")
             print(f"[{arrow.Arrow.fromtimestamp(line['time']).format()}] <{author}> {message}")
             for runner in self.commands:
-                if args[0] != runner.match:
-                    continue
+                if type(runner.match) == str:
+                    if args[0] != runner.match:
+                        continue
+                elif type(runner.match) == set:
+                    for match in runner.match:
+                        if args[0] != match:
+                            continue
+                else:
+                    reply(user['nick'], "Task failed spectacularly.")
                 if args:
                     args_ = args[1:]
                 else:
@@ -707,7 +726,7 @@ def help(self, user, ran, *args):
         self.reply(nick, line.strip())
 
 @bot.command("!status")
-def status(self, user, ran, job=None):
+def status(self, user, ran, job=None, callback=None):
     author = user['nick']
     if job:
         try:
@@ -716,14 +735,28 @@ def status(self, user, ran, job=None):
         except AssertionError:
             self.reply(author, "An internal continuity error occured!")
         else:
+            if callback:
+                msg[0] = callback(msg[0])
             self.reply(author, msg[0])
         return
     data = get_status()
-    self.reply(author, f"{data['todo']} jobs in todo, {data['claims']} jobs in claims.")
+    msg = f"{data['todo']} jobs in todo, {data['claims']} jobs in claims."
+    if callback:
+        msg = callback(msg)
+    self.reply(author, msg)
 
 @bot.command("!sutats")
 def sutats(self, user, ran, job=None):
-    return status(self, user, "!status", job)
+    return status(self, user, "!status", job, lambda a : a[::-1])
+
+WATEROFFDEAD_PERMUTATIONS = set(['!' + ''.join(p) for p in permutations("status")])
+print(WATEROFFDEAD_PERMUTATIONS)
+WATEROFFDEAD_PERMUTATIONS.discard('status')
+WATEROFFDEAD_PERMUTATIONS.discard('sutats')
+@bot.command(WATEROFFDEAD_PERMUTATIONS)
+def stdusiwyfw(self, user, ran, job=None):
+    d = lambda a : "".join(random.sample(list(a), len(a)))
+    return status(self, user, "!status", job, d)
 
 @bot.command("!stoptasks")
 def stoptasks(self, user, _ran):
