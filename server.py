@@ -238,6 +238,7 @@ def message_received(client, server, message):
         if STOP_FLAG.is_set():
             message = {"type": "item", "item": "", "started_by": "", "suppl": "NO_NEW_SERVES"}
             server.send_message(client, json.dumps(message))
+            return
         try:
             item = request_item(client)
             author, itemName = item['started_by'], item['item']
