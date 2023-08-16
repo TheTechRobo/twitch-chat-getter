@@ -352,8 +352,6 @@ class UploadData(Task):
                     print("Unrecognised server response.\n%s" % msg)
             chunk_num += 1
         print("Submitted ALL data.")
-        ws.send(json.dumps({"type": "fin", "chan": ctx['channel']}))
-        get_next_message(ws, "fin_ack")
 
         sha = sha.hexdigest()
         print("Hash:", sha)
@@ -361,10 +359,13 @@ class UploadData(Task):
             "type": "sha256",
             "payload": sha
         }}))
-        # TODO: Properly retry this
         assert get_next_message(ws, "verify_result")['res'] == "match"
         print("Hash verified.")
 
+        ws.send(json.dumps({"type": "fin", "chan": ctx['channel']}))
+        get_next_message(ws, "fin_ack")
+
+        # TODO: Properly retry upload if it fails
         current_status = None
         while current_status != "FINISHED":
             if current_status == "FAILED":
@@ -377,7 +378,7 @@ class UploadData(Task):
                 current_status = d['status']
                 print(f"Item entered {current_status.upper()} status.")
             ws.send(json.dumps({"type": "ping"}))
-            time.sleep(4)
+            time.sleep(2)
 
         print("Upload confirmed on IA!")
 
