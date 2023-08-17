@@ -669,12 +669,12 @@ class IrcBot:
 
     def reply(self, user: str, message: str):
         startof = f"{user}: " if user else ""
-        r = requests.post(self.postUrl, data=f"{startof}{message}")
+        r = requests.post(self.postUrl, data=f"{startof}{message}".encode("utf-8"))
         assert r.status_code == 200, f"FAILED {user} {message} {r}"
 
 def reply(user, message):
     startof = f"{user}: " if user else ""
-    assert requests.post(POST_URL, data=f"{startof}{message}").status_code == 200, f"FAILED {user} {message}"
+    assert requests.post(POST_URL, data=f"{startof}{message}".encode("utf-8")).status_code == 200, f"FAILED {user} {message}"
 
 print("Moving items around...")
 
@@ -717,12 +717,13 @@ bot = IrcBot(STREAM_URL, POST_URL)
 def help(self, user, ran, *args):
     nick = user['nick']
     text = ("List of commands:\n"
-            "!status <IDENTIFIER>: Gets job status by job ID (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb)\n"
-            "!status: Gets list of jobs in each queue.\n"
+            "!status <IDENTIFIER>: Returns the status of a given job (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.\n"
+            "!status: Returns the list of jobs in each queue.\n"
             "!a <URL> [EXPLANATION]: Archives the metadata of a twitch VOD or channel by its URL, saving the explanation into the database.\n"
-            "Be sure to provide explanations for your jobs, and try not to overload my servers!\n"
+            "Be sure to provide explanations for your jobs, and remember that everything queued here takes up space on IA.\n"
             "Please note that when a channel is queued here, only the metadata of the VODs will be saved, excluding clips and other channel content. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )\n"
-            "Also, archiving in bulk with transfer.archivete.am URLs works. Again, though, PLEASE do not overload my servers!")
+            "Also, archiving in bulk with transfer.archivete.am URLs works. This also applies to !status.\n"
+            "You can find the data on IA here: https://archive.org/details/archiveteam_twitch_metadata")
     for line in text.split("\n"):
         self.reply(nick, line.strip())
 
