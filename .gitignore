@@ -7,3 +7,4 @@ rethinkdb.log
 we_haul.py
 test/
 btt_upl
+/.env
