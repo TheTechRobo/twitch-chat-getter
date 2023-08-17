@@ -721,7 +721,7 @@ def help(self, user, ran, *args):
             "!status: Gets list of jobs in each queue.\n"
             "!a <URL> [EXPLANATION]: Archives the metadata of a twitch VOD or channel by its URL, saving the explanation into the database.\n"
             "Be sure to provide explanations for your jobs, and try not to overload my servers!\n"
-            "Please note that when you queue a channel here, only the metadata of the VODs will be saved, not the clips or anything like that. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )\n"
+            "Please note that when a channel is queued here, only the metadata of the VODs will be saved, excluding clips and other channel content. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )\n"
             "Also, archiving in bulk with transfer.archivete.am URLs works. Again, though, PLEASE do not overload my servers!")
     for line in text.split("\n"):
         self.reply(nick, line.strip())
