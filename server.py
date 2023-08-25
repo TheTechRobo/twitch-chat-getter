@@ -42,9 +42,6 @@ import requests
 from websocket_server import WebsocketServer
 from rethinkdb import r
 
-WHOIS = {}
-SECRET = os.getenv("SECRET")
-
 # Called for every client connecting (after handshake)
 def new_client(client, server):
     CLIENTS_DISCONNECTED.clear()
@@ -690,6 +687,8 @@ def reply(user, message):
 
 print("Moving items around...")
 
+# TODO: Put this in a function so it's not in the main scope.
+
 # Moving claimed items to error
 conn = r.connect()
 cursor = r.db("twitch").table("todo").get_all("claims", index="status")
@@ -726,7 +725,7 @@ PAUSE_UPLOADS: threading.Event = threading.Event()
 bot = IrcBot(STREAM_URL, POST_URL)
 
 @bot.command("!help")
-def help(self, user, ran, *args):
+def help(self, user, _ran, *args):
     nick = user['nick']
     text = ("List of commands:\n"
             "!status <IDENTIFIER>: Returns the status of a given job (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.\n"
@@ -740,7 +739,7 @@ def help(self, user, ran, *args):
         self.reply(nick, line.strip())
 
 @bot.command("!status")
-def status(self, user, ran, job=None, callback=None):
+def status(self, user, _ran, job=None, callback=None):
     author = user['nick']
     if job:
         try:
@@ -760,7 +759,7 @@ def status(self, user, ran, job=None, callback=None):
     self.reply(author, msg)
 
 @bot.command("!sutats")
-def sutats(self, user, ran, job=None):
+def sutats(self, user, _ran, job=None):
     return status(self, user, "!status", job, lambda a : a[::-1])
 
 WATEROFFDEAD_PERMUTATIONS = set(['!' + ''.join(p) for p in permutations("status")])
