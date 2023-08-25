@@ -130,17 +130,27 @@ def message_received(client, server, message):
         msg = json.loads(message)
     except Exception:
         return "Fail"
-    if msg.get("auth") == SECRET:
-        print("Secret-Auth")
-        clients[client['id']]['auth'] = True
-    if msg.get("auth") and msg.get("auth") != SECRET:
-        reply("TheTechRobo", "A client said the wrong password.")
+    if auth := msg.get("auth"):
+        if clients[client['id']].get("untrusted"):
+            return
+        conn = r.connect()
+        result = r.db("twitch").table("secrets").get(auth).run(conn)
+        if result:
+            print("Client", client, clients.get(client['id']), "auth'd.")
+            clients[client['id']]['auth'] = True
+        else:
+            reply("TheTechRobo", "Received an unrecognised password.")
+            print(f"Wrong password - received {auth}")
+            print("Client:", client, clients.get(client['id']))
+            clients[client['id']]['untrusted'] = True
+        del conn, result, auth
     if msg["type"] ==   "ping":
         msg["type"] =  "godot"
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
         return
     if not clients[client['id']]['auth']:
+        # Ignore their messages if they are not authenticated
         # maybe they'll be delayed by thinking it's a bad connection
         return
     if msg['type'] == "negotiate":
