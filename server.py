@@ -78,6 +78,7 @@ def client_left(client, _server):
 pool = futures.ThreadPoolExecutor(max_workers=2)
 
 def run_uploader_pipeline(uuid, dirname, chan):
+    dirname_ = dirname
     conn = r.connect()
     try:
         things_to_do = (
@@ -115,6 +116,7 @@ def run_uploader_pipeline(uuid, dirname, chan):
             "status": "FINISHED",
             "completed": True
         }).run(conn)['errors'] == 0
+        shutil.rmtree(dirname_)
     finally:
         conn.close()
 
@@ -322,7 +324,7 @@ def any_items_left(id, onlydone=True):
     return item_data['item'], items, error
 
 PORT=int_or_none(os.getenv("WSPORT")) or 9001
-server = WebsocketServer(port=PORT)
+server = WebsocketServer(port=PORT, host="0.0.0.0")
 server.set_fn_new_client(new_client)
 server.set_fn_client_left(client_left)
 server.set_fn_message_received(message_received)
@@ -752,7 +754,6 @@ def sutats(self, user, ran, job=None):
     return status(self, user, "!status", job, lambda a : a[::-1])
 
 WATEROFFDEAD_PERMUTATIONS = set(['!' + ''.join(p) for p in permutations("status")])
-print(WATEROFFDEAD_PERMUTATIONS)
 WATEROFFDEAD_PERMUTATIONS.discard('status')
 WATEROFFDEAD_PERMUTATIONS.discard('sutats')
 @bot.command(WATEROFFDEAD_PERMUTATIONS)

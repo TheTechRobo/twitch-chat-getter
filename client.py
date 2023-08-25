@@ -73,6 +73,7 @@ class DownloadData(Task):
         print(f"Starting warcprox for Item {self.item}")
         self.warcprox = subprocess.Popen([
             "warcprox", "-zp", self.WARCPROX_PORT,
+            "-c", "./file.pem",
             "--crawl-log-dir", "."
         ], preexec_fn=os.setpgrp)
         time.sleep(4)
@@ -106,15 +107,15 @@ class DownloadData(Task):
         open_and_wait([
             "yt-dlp", "--ignore-config", "--skip-download",
             # Some VODs return a 403 on the m3u8, so format data
-            # will be missing on those ones since we're stifling the errors
-            # better than getting nothing, though
+            # will be missing on those ones since we're stifling the errors.
+            # Better than getting nothing, though
             "--ignore-no-formats-error",
             "--write-info-json", "--write-description", "--write-thumbnail",
             "--write-all-thumbnails", "--no-check-certificate",
             "--retries", "4",
             # yt-dlp chat extraction is currently broken, so let's not make it crash
             #"--embed-subs", "--all-subs",
-            "--limit-rate", "150k", "-o", "infojson:%(id)s",
+            "--limit-rate", "300k", "-o", "infojson:%(id)s",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
@@ -122,12 +123,15 @@ class DownloadData(Task):
         with open("chat.json", "w+") as file:
             file.write("[]") # workaround for chat_downloader only writing the file when there are messages
         print("Downloading chat")
+        os.environ['CURL_CA_BUNDLE'] = "./file.pem"
         open_and_wait([
             shutil.which("chat_downloader"),
             "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
+            "--interruptible_retry", "False",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
+        del os.environ['CURL_CA_BUNDLE']
         ws.send('{"type": "ping"}')
 
     def _run_channel(self, item):
@@ -382,6 +386,12 @@ class UploadData(Task):
 
         print("Upload confirmed on IA!")
 
+class DeleteDirectories(Task):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
+        print("Deleting directory...")
+        shutil.rmtree(ctx['final_path'])
+        print("Directory deleted.")
+
 class Pipeline:
     tasks: list[Task] = []
 
@@ -401,6 +411,7 @@ class Pipeline:
                 item = item[1:]
             for task in self.tasks:
                 cls = task.__class__
+                ws.send(json.dumps({"type": "status", "task": cls.__name__}))
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
                 task.run(item, itemType, author, ident, full, queuedFor, ctx)
                 ws.send(json.dumps({"type": "ping"}))
@@ -457,7 +468,7 @@ def updateWS(ws):
         # unpack status code as network-endian (big endian) unsigned short
         code = struct.unpack("!H", data[:2])[0]
         print("Server responded with CLOSE frame.\n"
-                "Status Code: %d\tReason: %s" % (code, data[2:].decode()))
+                "Reason: %d %s" % (code, data[2:].decode()))
         print("Connection closed by remote host.")
         sys.exit(0)
     else:
@@ -515,7 +526,8 @@ def mainloop():
         PrepareDirectories,
         DownloadData,
         MoveFiles,
-        UploadData
+        UploadData,
+        DeleteDirectories
     ) # later we need to do things like put warcprox in its own task
     # tini
     while True:
