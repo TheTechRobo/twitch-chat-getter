@@ -85,7 +85,7 @@ class DownloadData(Task):
 
         return self.warcprox
 
-    def _kill_warcprox(self, warcprox, signal="9"):
+    def _kill_warcprox(self, warcprox, signal="INT"):
         print("Terminating warcprox")
         if not warcprox:
             print("Nothing to kill")
@@ -388,9 +388,8 @@ class UploadData(Task):
 
 class DeleteDirectories(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
-        print("Deleting directory...")
         shutil.rmtree(ctx['final_path'])
-        print("Directory deleted.")
+        shutil.rmtree(os.path.join(DATA_DIR, ctx['channel']))
 
 class Pipeline:
     tasks: list[Task] = []
