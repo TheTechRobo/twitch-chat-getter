@@ -14,8 +14,15 @@
    limitations under the License.
 """
 
-import atexit, websocket, json, os, time, sys, subprocess, shutil, os, os.path
-import hashlib, traceback, signal, collections, struct, hashlib, base64
+import atexit, time
+
+@atexit.register
+def wait_on_exit():
+    print("Waiting 10 seconds before exiting.")
+    time.sleep(30)
+
+import websocket, json, os, sys, subprocess, shutil, os, os.path, base64
+import hashlib, traceback, signal, collections, struct, hashlib
 import requests, yt_dlp, prevent_sigint
 
 from subprocess import PIPE
