@@ -525,18 +525,30 @@ def get_item_details(ident) -> list[dict[str, str]]:
 def start_pipeline_2(item, author, explain, item_for=None):
     if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", item):
         ids = []
+        errors = []
         try:
             fail = False
+            anysuccess = False
             for newitem in requests.get(item).text.strip().split("\n"):
                 #print("Queue", newitem)
                 d = start_pipeline_2(newitem, author, explain, item_for=item_for)
                 if d['status']:
                     ids.append(d['id'])
+                    anysuccess = True
                 else:
                     ids.append(f"Item {newitem} could not be queued: {d['msg']}.")
+                    errors.append(f"Item {newitem} could not be queued: {d['msg']}.")
                     fail = True
-            url = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids)).text
-            if fail:
+            statuscode = 0
+            while statuscode != 200:
+                r = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids))
+                statuscode = r.status_code
+                if statuscode != 200:
+                    time.sleep(1)
+            if anysuccess:
+                reply(author, f"No items could be queued; check {url} for more details.")
+            elif fail:
+                # TODO: Upload `errors` and provide it for this message.
                 reply(author, f"At least one item could not be queued; check {url} for more details.")
             return {"status": True, "id": url}
         except Exception as ename:
@@ -609,6 +621,20 @@ class Command:
                     success = True
             if not success:
                 return False
+
+        argspec = inspect.getfullargspec(self.runner)
+        minargs = len(argspec.args) - len(argspec.defaults or ())
+        if argspec.varargs:
+            maxargs = 5000
+        else:
+            maxargs = minargs
+        if len(args) < minArgs:
+            bot.reply(user['nick'], f"Not enough arguments for command {ran}.")
+            return True
+        if len(args) > maxArgs:
+            bot.reply(user['nick'], f"Too many arguments for command {ran}.")
+            return True
+
         self.runner(bot, user, ran, *args)
         return True
 
@@ -725,10 +751,10 @@ PAUSE_UPLOADS: threading.Event = threading.Event()
 bot = IrcBot(STREAM_URL, POST_URL)
 
 @bot.command("!help")
-def help(self, user, _ran, *args):
+def help(self, user, _ran):
     nick = user['nick']
     text = ("List of commands:\n"
-            "!status <IDENTIFIER>: Returns the status of a given job (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.\n"
+            "!status <IDENTIFIER> [IDENTIFIERS...]: Returns the status of the given job(s) (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.\n"
             "!status: Returns the list of jobs in each queue.\n"
             "!a <URL> [EXPLANATION]: Archives the metadata of a twitch VOD or channel by its URL, saving the explanation into the database.\n"
             "Be sure to provide explanations for your jobs, and remember that everything queued here takes up space on IA.\n"
@@ -739,15 +765,14 @@ def help(self, user, _ran, *args):
         self.reply(nick, line.strip())
 
 @bot.command("!status")
-def status(self, user, _ran, job=None, callback=None):
+def status(self, user, _ran, *jobs, callback=None):
     author = user['nick']
-    if job:
-        try:
+    if jobs:
+        for job in jobs:
+            if not job:
+                continue
             msg = generate_status_message(job)
             assert len(msg) == 1
-        except AssertionError:
-            self.reply(author, "An internal continuity error occured!")
-        else:
             if callback:
                 msg[0] = callback(msg[0])
             self.reply(author, msg[0])
@@ -760,7 +785,7 @@ def status(self, user, _ran, job=None, callback=None):
 
 @bot.command("!sutats")
 def sutats(self, user, _ran, job=None):
-    return status(self, user, "!status", job, lambda a : a[::-1])
+    return status(self, user, "!status", job, callback=lambda a : a[::-1])
 
 WATEROFFDEAD_PERMUTATIONS = set(['!' + ''.join(p) for p in permutations("status")])
 WATEROFFDEAD_PERMUTATIONS.discard('status')
@@ -768,7 +793,7 @@ WATEROFFDEAD_PERMUTATIONS.discard('sutats')
 @bot.command(WATEROFFDEAD_PERMUTATIONS)
 def stdusiwyfw(self, user, ran, job=None):
     d = lambda a : "".join(random.sample(list(a), len(a)))
-    return status(self, user, "!status", job, d)
+    return status(self, user, "!status", job, callback=d)
 
 @bot.command("!stoptasks")
 def stoptasks(self, user, _ran):
@@ -794,6 +819,14 @@ def stopuploads(self, _user, _ran):
 def startuploads(self, _user, _ran):
     PAUSE_UPLOADS.clear()
     self.reply(_user['nick'], "Resumed uploads")
+
+@bot.command("!uploadstatus")
+def upload_status(self, user, _ran, ident):
+    data = r.db("twitch").table("uploads").get(ident)
+    if ident:
+        self.reply(user['nick'], "That upload is " + data['status'])
+    else:
+        self.reply(user['nick'], "Could not find any upload with that ident.")
 
 try:
     bot.run_forever()
