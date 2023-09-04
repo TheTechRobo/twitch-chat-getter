@@ -184,7 +184,7 @@ def message_received(client, server, message):
         clients[client['id']]['upload_uuid'] = query_result['generated_keys'][0]
         clients[client['id']]['dirname'] = dirname
         Path(f"{dirname}/data.tgz").touch()
-        message = {"type": "mes", "action": "start"}
+        message = {"type": "mes", "action": "start", "refer_to": clients[client['id']]['upload_uuid']}
         server.send_message(client, json.dumps(message))
         return
     if msg['type'] == "chunk":
@@ -237,7 +237,7 @@ def message_received(client, server, message):
         server.send_message(client, json.dumps(message))
         return
     if msg['type'] == "upload_satuts":
-        uuid = clients[client['id']]['upload_uuid']
+        uuid = msg.get("target") or clients[client['id']]['upload_uuid']
         conn = r.connect()
         response = r.db("twitch").table("uploads").get(uuid).run(conn)
         message = {"type": "upload_status", "status": response['status']}
