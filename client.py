@@ -18,36 +18,21 @@ import atexit, time
 
 @atexit.register
 def wait_on_exit():
-    print("Waiting 10 seconds before exiting.")
+    print("Waiting 30 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
     time.sleep(30)
 
 import websocket, json, os, sys, subprocess, shutil, os, os.path, base64
-import hashlib, traceback, signal, collections, struct, hashlib
-import requests, yt_dlp, prevent_sigint
+import hashlib, traceback, signal, collections, struct, hashlib, logging
+import requests, yt_dlp, prevent_sigint, subprocess_with_logging
 
 from subprocess import PIPE
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
 assert DATA_DIR.startswith("/")
-assert os.getenv("CURL_CA_BUNDLE") == "", "Set CURL_CA_BUNDLE to an empty string"
 
 def open_and_wait(args, ws):
-    process = subprocess.Popen(args, shell=False, preexec_fn=os.setpgrp)
-    @atexit.register
-    def kill_process():
-        process.terminate()
-    while True:
-        status = process.poll()
-        if status is None:
-            # Process hasn't finished yet
-            ws.send('{"type": "ping"}')
-            time.sleep(1)
-            continue
-        # Process has finished
-        assert status == 0, f"Bad exit code {status}"
-        break
-    atexit.unregister(kill_process)
+    process = subprocess_with_logging.run_with_log(args, shell=False, preexec_fn=os.setpgrp, check=True)
 
 class Task:
     def __init__(self, logger, ws):
@@ -76,13 +61,15 @@ class DownloadData(Task):
     warcprox = None
 
     def _start_warcprox(self):
+        # FIXME: Run run_with_log in a separate thread.
+        # That way we can detect more cleanly if warcprox crashes.
         self.WARCPROX_PORT = "4553"
         print(f"Starting warcprox for Item {self.item}")
         self.warcprox = subprocess.Popen([
             "warcprox", "-zp", self.WARCPROX_PORT,
             "-c", "./file.pem",
             "--crawl-log-dir", "."
-        ], preexec_fn=os.setpgrp)
+        ], preexec_fn=os.setpgrp, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         time.sleep(4)
         file_hash = ""
         with open(__file__, "rb") as file:
@@ -104,7 +91,10 @@ class DownloadData(Task):
             self.ws.send('{"type": "ping"}')
         except Exception:
             pass
-        warcprox.wait()
+        stdout, stderr = warcprox.communicate()
+        assert not stderr, "stderr should have been redirected to stdout"
+        with open("warcprox__log.log", "xb") as file:
+            file.write(stdout)
 
     def _run_vod(self, item):
         ws = self.ws
@@ -222,6 +212,7 @@ class DownloadData(Task):
                 self._kill_warcprox(self.warcprox)
             except Exception:
                 print("Couldnt kill warcprox lol")
+                print(traceback.format_exc())
 
 class MoveFiles(Task):
     def _move_vod(self, ctx):
@@ -384,7 +375,12 @@ class UploadData(Task):
             ws.send(json.dumps({
                 "type": "upload_satuts"
             }))
-            d = get_next_message(ws, "upload_status")
+            d = {"type": None}
+            while d['type'] != "upload_status":
+                d = get_next_message(ws)
+                assert d['type'] in ("upload_status", "upload_log"), f"Received Unrecognised Thing {d}"
+                if d['type'] == "upload_log":
+                    print("Recv'd(%d):" % 1 if d.get("exception") else 0, d['payload'], end="", flush=True)
             if d['status'] != current_status:
                 current_status = d['status']
                 print(f"Item entered {current_status.upper()} status.")
@@ -397,6 +393,40 @@ class DeleteDirectories(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         shutil.rmtree(ctx['final_path'])
         shutil.rmtree(os.path.join(DATA_DIR, ctx['channel']))
+
+class Logger:
+    def __init__(self, prefix, old):
+        self.prefix = prefix
+        self.old = old
+
+    def write(self, message):
+        if message.strip():
+            # print likes to do a separate call for its `end` parameter
+            logging.info(f"{self.prefix} {message.rstrip()}")
+            print(message, file=self.old)
+
+    def flush(self):
+        pass
+
+class RedirectStdout(Task):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
+        # This is a really shitty solution, but I'd rather not have to change all the print statements.
+        logging.basicConfig(filename=os.path.join(ctx['folder'], "btt.log"), level=logging.DEBUG,
+                format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)"
+        )
+        ctx['logfile'] = os.path.join(ctx['folder'], "btt.log")
+        ctx['soutback'] = sys.stdout
+        # Redirecting stderr seems to cause issues with excpetion handling
+        #ctx['serrback'] = sys.stderr
+        sys.stdout = Logger("PRINT", ctx['soutback'])
+        #sys.stderr = Logger("PERR ", ctx['serrback'])
+        assert sys.stdout is not ctx['soutback'], "They're the same picture."
+        print(sys.stdout, ctx['soutback'])
+
+class RecoverStdout(Task):
+    def run(self, item, itemType, author, id, full, queued_for, ctx):
+        sys.stdout = ctx['soutback']
+        assert sys.stdout is ctx['soutback'], "wtf???"
 
 class Pipeline:
     tasks: list[Task] = []
@@ -426,11 +456,18 @@ class Pipeline:
             print("Caught exception!")
             print("Sending to server and aborting.")
             data = "".join(traceback.format_exception(*sys.exc_info()))
+
+            with open(ctx['logfile']) as file:
+                logfile = file.read()
+            with open(os.path.join(ctx['folder'], "warcprox__log.log")) as file:
+                logfile += "\n\nWarcprox log:\n"
+                logfile += file.read()
+
             class Dummy:
                 status_code = 0
             resp = Dummy()
             while resp.status_code != 200:
-                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nctx={json.dumps(ctx)}")
+                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}")
             url = resp.text.replace(".am/", ".am/inline/")
 
             ws.send(json.dumps({
@@ -530,8 +567,10 @@ def mainloop():
     pipeline = Pipeline(
         ws,
         PrepareDirectories,
+        RedirectStdout,
         DownloadData,
         MoveFiles,
+        RecoverStdout,
         UploadData,
         DeleteDirectories
     ) # later we need to do things like put warcprox in its own task

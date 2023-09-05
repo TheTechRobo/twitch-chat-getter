@@ -5,6 +5,8 @@ IRC bot that fetches the chat and metadata of Twitch VODs
 Coming Soon :tm: , but use `prepServerDB.py` to at least get the database working. (You'll need RethinkDB.)
 
 ## Licence
+Note that subprocess_with_logging.py is licenced separately.
+
    Copyright 2022-2023 TheTechRobo
 
    Licensed under the Apache License, Version 2.0 (the "License");

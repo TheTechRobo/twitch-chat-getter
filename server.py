@@ -21,6 +21,7 @@ import os
 import traceback
 import hashlib
 import threading
+import inspect
 import re
 import functools
 import time
@@ -48,13 +49,23 @@ def new_client(client, server):
     print("New client connected and was given id %d" % client['id'])
     server.send_message(client, """
             {"type":"godot", "method":"ping"}""")
-    client["auth"] = False
-    client['tasks'] = {}
-    clients[client['id']] = client
+    A_LOCK_OR_SOMETHING.acquire()
+    try:
+        client["auth"] = False
+        client['tasks'] = {}
+        clients[client['id']] = client
+    finally:
+        A_LOCK_OR_SOMETHING.release()
 
+def client_left(client, _server):
+    A_LOCK_OR_SOMETHING.acquire()
+    try:
+        return client_leftt(client, _server)
+    finally:
+        A_LOCK_OR_SOMETHING.release()
 
 # Called for every client disconnecting
-def client_left(client, _server):
+def client_leftt(client, _server):
     for (item, author) in clients[client['id']]['tasks'].values():
         reply(author, f"Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
         client['reason'] = "disconnect"
@@ -74,7 +85,7 @@ def client_left(client, _server):
 
 pool = futures.ThreadPoolExecutor(max_workers=2)
 
-def run_uploader_pipeline(uuid, dirname, chan):
+def run_uploader_pipeline(uuid, dirname, chan, handler):
     dirname_ = dirname
     conn = r.connect()
     try:
@@ -84,7 +95,7 @@ def run_uploader_pipeline(uuid, dirname, chan):
                 ("SET_DIRNAME_TO_SUBDIRECTORY", "UPDATING_VARS"),
                 ("./extract_urls.zsh", "EXTRACTING_URLS"),
                 ("./tarrer.zsh", "TARRING_DIRECTORY"),
-                (["./upload_to_ia.zsh", "{dirname}", chan], "UPLOADING_TO_IA")
+                #(["./upload_to_ia.zsh", "{dirname}", chan], "UPLOADING_TO_IA")
         )
         for thing, status in things_to_do:
             print(thing, status)
@@ -101,11 +112,20 @@ def run_uploader_pipeline(uuid, dirname, chan):
                 continue
             for idx, param in enumerate(thing):
                 thing[idx] = param.replace("{dirname}", dirname)
-            subprocess.run(thing, check=True)
+            process = subprocess.Popen(thing, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for line in process.stdout:
+                line = line.decode("utf-8", errors="backslashreplace")
+                handler.send_text(json.dumps({"type": "upload_log", "payload": line}))
+            stdout, stderr = process.communicate()
+            assert (not stdout) and (not stderr), "EOF passed while running command"
+            if process.returncode != 0:
+                raise RuntimeError("Process returned %s" % process.returncode)
     except Exception as ename:
         r.db("twitch").table("uploads").get(uuid).update({
-            "status": "FAILED"
+            "status": "FAILED",
+            "EXC": traceback.format_exc()
         }).run(conn)
+        handler.send_text(json.dumps({"type": "upload_log", "payload": traceback.format_exc(), "exception": True}))
         traceback.print_exc()
         raise
     else:
@@ -117,12 +137,21 @@ def run_uploader_pipeline(uuid, dirname, chan):
     finally:
         conn.close()
 
+A_LOCK_OR_SOMETHING: threading.Lock = threading.Lock()
+
+def message_received(*args, **kwargs):
+    A_LOCK_OR_SOMETHING.acquire()
+    try:
+        return message_receivedd(*args, **kwargs)
+    finally:
+        A_LOCK_OR_SOMETHING.release()
+
 # Called when a client sends a message
-def message_received(client, server, message):
+def message_receivedd(client, server, message):
     if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
         client['handler'].send_close(1001, b"Server going down")
     if len(message) > 4*1024*1024: # 2 MiB
-        client['handler'].send_close(1009, b"Max msg size is 1MiB")
+        client['handler'].send_close(1009, b"Max msg size is 1Mb")
     try:
         msg = json.loads(message)
     except Exception:
@@ -211,7 +240,7 @@ def message_received(client, server, message):
         # Start upload pipeline
         dirname = clients[client['id']]['dirname']
         chan = msg['chan']
-        pool.submit(run_uploader_pipeline, uuid, dirname, chan)
+        pool.submit(run_uploader_pipeline, uuid, dirname, chan, client['handler'])
         # Confirm to client that item has started
         message = {"type": "fin_ack"}
         server.send_message(client, json.dumps(message))
@@ -372,7 +401,7 @@ def error_item(item, id, client, reason):
         errored = True
     if not data:
         reply(":WARNING", "This item no longer appears to exist! In order to prevent data loss, here is the data the client sent.")
-        url = requests.put("https://transfer.archivete.am/pebbles-errlog", json={"item": item, "client": (client['id'], client['address']), "reason": reason, "time":time.time()}).text
+        url = requests.put("https://transfer.archivete.am/pebbles-errlog", json={"item": item, "client": (client['id'], client['address']), "reason": reason, "time":time.time()}, timeout=10).text
         reply("", url)
         return
     data['moved_at'] = time.time()
@@ -479,7 +508,7 @@ def generate_status_message(ident) -> str:
             status_code = 0
         resp = DummyResponse()
         while resp.status_code != 200:
-            resp = requests.put("https://transfer.archivete.am/pebbles-job-status", data="\n\n".join(messages))
+            resp = requests.put("https://transfer.archivete.am/pebbles-job-status", data="\n\n".join(messages), timeout=10)
         url = resp.text.replace(".am/", ".am/inline/")
         return [f"There are multiple messages, so go here: {url}"]
     assert len(messages) == 1
@@ -490,7 +519,7 @@ def get_item_details(ident) -> list[dict[str, str]]:
     conn = r.connect()
     idents = [ident]
     if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", ident):
-        idents = requests.get(ident).text.split("\n")
+        idents = requests.get(ident, timeout=19).text.split("\n")
     results = []
     for identifier in idents:
         if "could not be queued:" in identifier:
@@ -529,7 +558,7 @@ def start_pipeline_2(item, author, explain, item_for=None):
         try:
             fail = False
             anysuccess = False
-            for newitem in requests.get(item).text.strip().split("\n"):
+            for newitem in requests.get(item, timeout=10).text.strip().split("\n"):
                 #print("Queue", newitem)
                 d = start_pipeline_2(newitem, author, explain, item_for=item_for)
                 if d['status']:
@@ -541,10 +570,11 @@ def start_pipeline_2(item, author, explain, item_for=None):
                     fail = True
             statuscode = 0
             while statuscode != 200:
-                r = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids))
+                r = requests.put("https://transfer.archivete.am/pebbles-bulk-ids", data="\n".join(ids), timeout=10)
                 statuscode = r.status_code
                 if statuscode != 200:
                     time.sleep(1)
+            url = r.text
             if anysuccess:
                 reply(author, f"No items could be queued; check {url} for more details.")
             elif fail:
@@ -623,11 +653,13 @@ class Command:
                 return False
 
         argspec = inspect.getfullargspec(self.runner)
-        minargs = len(argspec.args) - len(argspec.defaults or ())
+        # Take the number of arguments, subtract the number of arguments with default values, then subtract
+        # the number of arguments that are not from the message.
+        minArgs = len(argspec.args) - len(argspec.defaults or ()) - 3
         if argspec.varargs:
-            maxargs = 5000
+            maxArgs = 5000
         else:
-            maxargs = minargs
+            maxArgs = minArgs
         if len(args) < minArgs:
             bot.reply(user['nick'], f"Not enough arguments for command {ran}.")
             return True
@@ -704,12 +736,12 @@ class IrcBot:
 
     def reply(self, user: str, message: str):
         startof = f"{user}: " if user else ""
-        r = requests.post(self.postUrl, data=f"{startof}{message}".encode("utf-8"))
+        r = requests.post(self.postUrl, data=f"{startof}{message}".encode("utf-8"), timeout=10)
         assert r.status_code == 200, f"FAILED {user} {message} {r}"
 
 def reply(user, message):
     startof = f"{user}: " if user else ""
-    assert requests.post(POST_URL, data=f"{startof}{message}".encode("utf-8")).status_code == 200, f"FAILED {user} {message}"
+    assert requests.post(POST_URL, data=f"{startof}{message}".encode("utf-8"), timeout=10).status_code == 200, f"FAILED {user} {message}"
 
 print("Moving items around...")
 
@@ -724,6 +756,7 @@ for entry in cursor.run(conn):
     entry["moved_at"] = time.time()
     r.db("twitch").table("error").insert(entry).run(conn)
     r.db("twitch").table("todo").get(entry['id']).delete().run(conn)
+    del entry, prettifiedItem
 
 cursor = r.db("twitch").table("uploads").get_all(False, index="completed")
 
