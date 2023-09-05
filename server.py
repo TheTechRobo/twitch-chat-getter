@@ -659,7 +659,7 @@ class Command:
         if argspec.varargs:
             maxArgs = 5000
         else:
-            maxArgs = minArgs
+            maxArgs = len(argspec.args) - 3
         if len(args) < minArgs:
             bot.reply(user['nick'], f"Not enough arguments for command {ran}.")
             return True
@@ -784,7 +784,23 @@ PAUSE_UPLOADS: threading.Event = threading.Event()
 bot = IrcBot(STREAM_URL, POST_URL)
 
 @bot.command("!help")
-def help(self, user, _ran):
+def help(self, user, _ran, command=None):
+    """
+    Really?
+    """
+    if command:
+        try:
+            ret = globals()[command].runner.__doc__.strip()
+        except (AttributeError, KeyError):
+            ret = ["N̸͖͂o̸̢̢͑̾ͅ ̵͎̒̕͝h̸͖͎͖̺͂ě̶̢͈̥̄l̶̡̩̣̊p̸̧̠͍̖̃̐̽͝ ̷̭̟̀͛̆́f̷̣̀̎o̶̖̮͑͛͜r̶̫͋̂̏̚ ̷͉̼̪́̕ÿ̸̟̺̻̙́ǫ̵̫̱̥̉̽ū̴͎̤̹͆̔̈.̴̢̯̜̥͋͝.̶̢̖̪̈́͝.̶̲͔̹̉",]
+        for line in ret.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            reply(user['nick'], line)
+        if random.randint(0, 10000) == 42:
+            reply(user['nick'], "fireonlive is awesome")
+        return
     nick = user['nick']
     text = ("List of commands:\n"
             "!status <IDENTIFIER> [IDENTIFIERS...]: Returns the status of the given job(s) (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.\n"
@@ -799,6 +815,17 @@ def help(self, user, _ran):
 
 @bot.command("!status")
 def status(self, user, _ran, *jobs, callback=None):
+    """
+    Gets the number of jobs in each queue, or the current status of a job.
+    Examples:
+    - !status
+    > 0 jobs in todo, 0 jobs in claims.
+    (todo is the queue; claims are in-progress jobs.)
+    - !status 1319f607-38e6-4210-a3ed-4a540424a6fb
+    > Shows the information about that job.
+    - !status 1319f607-38e6-4210-a3ed-4a540424a6fb 8b1d2d80-7a8e-43e6-8f6f-1cb171f3bf69
+    > Shows the information about those two jobs.
+    """
     author = user['nick']
     if jobs:
         for job in jobs:
@@ -818,6 +845,9 @@ def status(self, user, _ran, *jobs, callback=None):
 
 @bot.command("!sutats")
 def sutats(self, user, _ran, job=None):
+    """
+    Don't.
+    """
     return status(self, user, "!status", job, callback=lambda a : a[::-1])
 
 WATEROFFDEAD_PERMUTATIONS = set(['!' + ''.join(p) for p in permutations("status")])
@@ -825,36 +855,60 @@ WATEROFFDEAD_PERMUTATIONS.discard('status')
 WATEROFFDEAD_PERMUTATIONS.discard('sutats')
 @bot.command(WATEROFFDEAD_PERMUTATIONS)
 def stdusiwyfw(self, user, ran, job=None):
+    """
+    *Please* don't.
+    """
     d = lambda a : "".join(random.sample(list(a), len(a)))
     return status(self, user, "!status", job, callback=d)
 
 @bot.command("!stoptasks")
 def stoptasks(self, user, _ran):
+    """
+    Stops item handouts. Useful if twitch breaks something.
+    """
     STOP_FLAG.set()
     self.reply(user['nick'], "STOP_FLAG has been set. No items will be served.")
 
 @bot.command("!starttasks")
 def starttasks(self, user, _ran):
+    """
+    Starts item handouts after they were stopped with !stoptasks
+    """
     STOP_FLAG.clear()
     self.reply(user['nick'], "STOP_FLAG has been cleared. Items can now be served.")
 
 @bot.command("!a")
-def archive(_self, user, _ran, item, *explain):
+def a(_self, user, _ran, item, *explain):
+    """
+    Queues something by its URL with an explanation you provide.
+    Examples:
+    - !a https://twitch.tv/nasa Official channel of NASA, a space agency
+    - !a https://twitch.tv/videos/43573487 Risk of being taken down
+    """
     explain = " ".join(explain)
     start_pipeline_2w(item, user['nick'], explain)
 
 @bot.command("!stopuploads")
 def stopuploads(self, _user, _ran):
+    """
+    Temporarily disable uploads.
+    """
     PAUSE_UPLOADS.set()
     self.reply(_user['nick'], "Paused uploads")
 
 @bot.command("!startuploads")
 def startuploads(self, _user, _ran):
+    """
+    Resume uploads.
+    """
     PAUSE_UPLOADS.clear()
     self.reply(_user['nick'], "Resumed uploads")
 
 @bot.command("!uploadstatus")
 def upload_status(self, user, _ran, ident):
+    """
+    WIP
+    """
     data = r.db("twitch").table("uploads").get(ident)
     if ident:
         self.reply(user['nick'], "That upload is " + data['status'])
