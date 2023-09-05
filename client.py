@@ -124,6 +124,7 @@ class DownloadData(Task):
         open_and_wait([
             shutil.which("chat_downloader"),
             "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
+            "--logging", "warning",
             "--interruptible_retry", "False",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
