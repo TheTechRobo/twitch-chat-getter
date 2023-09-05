@@ -792,7 +792,7 @@ def help(self, user, _ran, command=None):
         try:
             ret = globals()[command].runner.__doc__.strip()
         except (AttributeError, KeyError):
-            ret = ["N̸͖͂o̸̢̢͑̾ͅ ̵͎̒̕͝h̸͖͎͖̺͂ě̶̢͈̥̄l̶̡̩̣̊p̸̧̠͍̖̃̐̽͝ ̷̭̟̀͛̆́f̷̣̀̎o̶̖̮͑͛͜r̶̫͋̂̏̚ ̷͉̼̪́̕ÿ̸̟̺̻̙́ǫ̵̫̱̥̉̽ū̴͎̤̹͆̔̈.̴̢̯̜̥͋͝.̶̢̖̪̈́͝.̶̲͔̹̉",]
+            ret = "N̸͖͂o̸̢̢͑̾ͅ ̵͎̒̕͝h̸͖͎͖̺͂ě̶̢͈̥̄l̶̡̩̣̊p̸̧̠͍̖̃̐̽͝ ̷̭̟̀͛̆́f̷̣̀̎o̶̖̮͑͛͜r̶̫͋̂̏̚ ̷͉̼̪́̕ÿ̸̟̺̻̙́ǫ̵̫̱̥̉̽ū̴͎̤̹͆̔̈.̴̢̯̜̥͋͝.̶̢̖̪̈́͝.̶̲͔̹̉"
         for line in ret.split("\n"):
             line = line.strip()
             if not line:
