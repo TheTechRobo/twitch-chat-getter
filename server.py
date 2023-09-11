@@ -575,7 +575,7 @@ def start_pipeline_2(item, author, explain, item_for=None):
                 if statuscode != 200:
                     time.sleep(1)
             url = r.text
-            if anysuccess:
+            if not anysuccess:
                 reply(author, f"No items could be queued; check {url} for more details.")
             elif fail:
                 # TODO: Upload `errors` and provide it for this message.
