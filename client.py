@@ -103,15 +103,25 @@ class DownloadData(Task):
         print("Downloading metadata")
         open_and_wait([
             "yt-dlp", "--ignore-config", "--skip-download",
+            # Keep the filenames to a sane length
+            # All of the metadata used by the filename is in the infojson/WARC,
+            # so we're not losing any data by doing this.
+            # Some items were failing due to a too-long filename.
+            # ext4 limits it to 255 chars, but let's play it safe.
+            "--trim-filenames", "200"
             # Some VODs return a 403 on the m3u8, so format data
             # will be missing on those ones since we're stifling the errors.
             # Better than getting nothing, though
             "--ignore-no-formats-error",
-            "--write-info-json", "--write-description", "--write-thumbnail",
-            "--write-all-thumbnails", "--no-check-certificate",
+            # Write metadata and thumbnail
+            "--write-info-json", "--write-description", "--write-thumbnail", "--write-all-thumbnails"
+            # TODO: Check the certificate
+            "--no-check-certificate",
+            # Multiple retries
             "--retries", "4",
             # yt-dlp chat extraction is currently broken, so let's not make it crash
             #"--embed-subs", "--all-subs",
+            # Limit speed and put the infojson in a specific file
             "--limit-rate", "300k", "-o", "infojson:%(id)s",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
