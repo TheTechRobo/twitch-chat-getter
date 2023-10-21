@@ -114,7 +114,7 @@ class DownloadData(Task):
             # Better than getting nothing, though
             "--ignore-no-formats-error",
             # Write metadata and thumbnail
-            "--write-info-json", "--write-description", "--write-thumbnail", "--write-all-thumbnails"
+            "--write-info-json", "--write-description", "--write-thumbnail", "--write-all-thumbnails",
             # TODO: Check the certificate
             "--no-check-certificate",
             # Multiple retries
