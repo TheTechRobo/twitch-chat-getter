@@ -220,6 +220,7 @@ class MoveFiles(Task):
         with open(os.path.join(ctx['folder'], f"v{self.item}.info.json")) as f:
             data = json.load(f)
             channel = data['uploader_id']
+        ctx['logfile'] = "Unavailable."
         os.chdir(DATA_DIR)
         subprocess.run([
             "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
@@ -413,7 +414,8 @@ class RedirectStdout(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         # This is a really shitty solution, but I'd rather not have to change all the print statements.
         logging.basicConfig(filename=os.path.join(ctx['folder'], "btt.log"), level=logging.DEBUG,
-                format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)"
+                format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)",
+                force=True
         )
         ctx['logfile'] = os.path.join(ctx['folder'], "btt.log")
         ctx['soutback'] = sys.stdout
@@ -458,11 +460,17 @@ class Pipeline:
             print("Sending to server and aborting.")
             data = "".join(traceback.format_exception(*sys.exc_info()))
 
-            with open(ctx['logfile']) as file:
-                logfile = file.read()
-            with open(os.path.join(ctx['folder'], "warcprox__log.log")) as file:
-                logfile += "\n\nWarcprox log:\n"
-                logfile += file.read()
+            try:
+                with open(ctx['logfile']) as file:
+                    logfile = file.read()
+            except FileNotFoundError:
+                logfile = "Logfile not found. The file may have already been moved."
+            try:
+                with open(os.path.join(ctx['folder'], "warcprox__log.log")) as file:
+                    logfile += "\n\nWarcprox log:\n"
+                    logfile += file.read()
+            except FileNotFoundError:
+                logfile += "Warcprox logfile not found. The file may have already been moved."
 
             class Dummy:
                 status_code = 0
@@ -570,8 +578,8 @@ def mainloop():
         PrepareDirectories,
         RedirectStdout,
         DownloadData,
-        MoveFiles,
         RecoverStdout,
+        MoveFiles,
         UploadData,
         DeleteDirectories
     ) # later we need to do things like put warcprox in its own task
