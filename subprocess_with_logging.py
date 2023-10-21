@@ -17,21 +17,27 @@ import subprocess
 _logger = logging.getLogger(__name__)
 
 
-def run_with_log(args, *, check = True, input = None, **kwargs):
+def run_with_log(args=None, *, check = True, input = None, log_prefix = "", p=None, **kwargs):
 	'''
 	Run a command using `subprocess.Popen(args, **kwargs)` and log all its std(out|err) output via `logging`.
 	`check` has the same semantics as on `subprocess.run`, i.e. raises an exception if the process exits non-zero.
 	`input`, if specified, is a `bytes` or a binary file-like object that is fed to the subprocess via stdin.
+	`log_prefix`, as the name suggests, will be prepended to the logs.
 	`stdin`, `stdout`, and `stderr` kwargs must not be used.
+	`p`, if specified, is an existing subprocess to act on. Ensure that stdout and stderr are piped!
 	Returns a tuple with the process's exit status, its stdout output, and its stderr output.
 	'''
+	if not args:
+		if not p:
+			raise ValueError("Either args or p must be specified")
 	badKwargs = {'stdin', 'stdout', 'stderr'}.intersection(set(kwargs))
 	if badKwargs:
 		raise ValueError(f'Disallowed kwargs: {", ".join(sorted(badKwargs))}')
-	_logger.info(f'Running subprocess: {args!r}')
+	_logger.info(f'{log_prefix}Running subprocess: {args!r}')
 	if input is not None:
 		kwargs['stdin'] = subprocess.PIPE
-	p = subprocess.Popen(args, **kwargs, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+	if not p:
+		p = subprocess.Popen(args, **kwargs, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
 	sel = selectors.DefaultSelector()
 	if input is not None:
 		sel.register(p.stdin, selectors.EVENT_WRITE)
@@ -82,7 +88,7 @@ def run_with_log(args, *, check = True, input = None, **kwargs):
 						continue
 					lines = lines[0].decode('utf-8').split('\n')
 					for line in lines:
-						_logger.info(f"STDERR {line}")
+						_logger.info(f"{log_prefix}STDERR {line}")
 				else:
 					stdout.append(data)
 					stdoutBuf += data
@@ -91,16 +97,16 @@ def run_with_log(args, *, check = True, input = None, **kwargs):
 						continue
 					lines = lines[0].decode('utf-8').split('\n')
 					for line in lines:
-						_logger.info(f"STDOUT {line}")
+						_logger.info(f"{log_prefix}STDOUT {line}")
 	if stderrBuf:
-		_logger.info(f"RemaindErr: {stderrBuf.decode('utf-8')}")
+		_logger.info(f"{log_prefix}RemaindErr: {stderrBuf.decode('utf-8')}")
 	if stdoutBuf:
-		_logger.info(f"RemaindOut: {stdoutBuf.decode('utf-8')}")
+		_logger.info(f"{log_prefix}RemaindOut: {stdoutBuf.decode('utf-8')}")
 	p.wait()
 	assert p.poll() is not None
 	if input is not None and inputIsBytes and stdinOffset < len(input):
-		_logger.warning(f'Could not write all input to the stdin pipe (wanted to write {len(input)} bytes, only wrote {stdinOffset})')
-	_logger.info(f'Process exited with status {p.returncode}')
+		_logger.warning(f'{log_prefix}Could not write all input to the stdin pipe (wanted to write {len(input)} bytes, only wrote {stdinOffset})')
+	_logger.info(f'{log_prefix}Process exited with status {p.returncode}')
 	if check and p.returncode != 0:
 		raise subprocess.CalledProcessError(returncode = p.returncode, cmd = args)
 	return (p.returncode, b''.join(stdout).decode('utf-8'), b''.join(stderr).decode('utf-8'))

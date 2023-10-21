@@ -18,21 +18,19 @@ import atexit, time
 
 @atexit.register
 def wait_on_exit():
-    print("Waiting 30 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
-    time.sleep(30)
+    print("Waiting 20 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
+    time.sleep(20)
 
 import websocket, json, os, sys, subprocess, shutil, os, os.path, base64
 import hashlib, traceback, signal, collections, struct, hashlib, logging
-import requests, yt_dlp, prevent_sigint, subprocess_with_logging
-
-from subprocess import PIPE
+import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
 assert DATA_DIR.startswith("/")
 
 def open_and_wait(args, ws):
-    process = subprocess_with_logging.run_with_log(args, shell=False, preexec_fn=os.setpgrp, check=True)
+    process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
 
 class Task:
     def __init__(self, logger, ws):
@@ -58,18 +56,23 @@ class PrepareDirectories(Task):
         self.prepare_directories(ctx)
 
 class DownloadData(Task):
-    warcprox = None
+    warcprox_pid: typing.Optional[int] = None
+    warcprox_log = None
 
-    def _start_warcprox(self):
-        # FIXME: Run run_with_log in a separate thread.
-        # That way we can detect more cleanly if warcprox crashes.
-        self.WARCPROX_PORT = "4553"
+    def _run_warcprox(self):
         print(f"Starting warcprox for Item {self.item}")
-        self.warcprox = subprocess.Popen([
+        self.warcprox_log = open("warcprox__log.log", "w+")
+        self.process = subprocess.Popen([
             "warcprox", "-zp", self.WARCPROX_PORT,
             "-c", "./file.pem",
             "--crawl-log-dir", "."
-        ], preexec_fn=os.setpgrp, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        ], start_new_session=True, stdout=self.warcprox_log, stderr=self.warcprox_log)
+        self.warcprox_pid = self.process.pid
+
+    def _start_warcprox(self):
+        print("Starting warcprox...")
+        self.WARCPROX_PORT = "4553"
+        self._run_warcprox()
         time.sleep(4)
         file_hash = ""
         with open(__file__, "rb") as file:
@@ -77,29 +80,21 @@ class DownloadData(Task):
         assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s" % file_hash).status_code == 204
         self.ws.send(json.dumps({"type": "ping"}))
 
-        return self.warcprox
-
-    def _kill_warcprox(self, warcprox, signal="INT"):
+    def _kill_warcprox(self, pid, sig="INT"):
         print("Terminating warcprox")
-        if not warcprox:
+        if not pid:
             print("Nothing to kill")
             return
         subprocess.run([
-            shutil.which("kill"), f"-{signal}", str(warcprox.pid)]
+            shutil.which("kill"), f"-{sig}", str(pid)]
         ).check_returncode()
         try:
             self.ws.send('{"type": "ping"}')
         except Exception:
             pass
-        stdout, stderr = warcprox.communicate()
-        assert not stderr, "stderr should have been redirected to stdout"
-        with open("warcprox__log.log", "xb") as file:
-            file.write(stdout)
 
     def _run_vod(self, item):
         ws = self.ws
-
-        self.warcprox = self._start_warcprox()
         print("Downloading metadata")
         open_and_wait([
             "yt-dlp", "--ignore-config", "--skip-download",
@@ -143,7 +138,6 @@ class DownloadData(Task):
         ws.send('{"type": "ping"}')
 
     def _run_channel(self, item):
-        self.warcprox = self._start_warcprox()
         proxy = "http://localhost:" + self.WARCPROX_PORT
         options = {
                 "proxy": proxy,
@@ -208,6 +202,7 @@ class DownloadData(Task):
         self.itemType = itemType
         with open("jobdata.json", "w+") as file:
             file.write(json.dumps(self.full))
+        self._start_warcprox()
         if itemType == 'v':
             self._run_vod(item)
         elif itemType == 'c':
@@ -220,10 +215,17 @@ class DownloadData(Task):
             self._run(*args, **kwargs)
         finally:
             try:
-                self._kill_warcprox(self.warcprox)
+                self.warcprox_log.close()
+            except Exception:
+                print("Could not close file")
+                print(traceback.format_exc())
+                print("---------------")
+            try:
+                self._kill_warcprox(self.warcprox_pid)
             except Exception:
                 print("Couldnt kill warcprox lol")
                 print(traceback.format_exc())
+                raise
 
 class MoveFiles(Task):
     def _move_vod(self, ctx):
@@ -486,7 +488,7 @@ class Pipeline:
                 status_code = 0
             resp = Dummy()
             while resp.status_code != 200:
-                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}")
+                resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}", timeout=120)
             url = resp.text.replace(".am/", ".am/inline/")
 
             ws.send(json.dumps({
@@ -511,7 +513,7 @@ class Pipeline:
             return self._start(*args, **kwargs)
 
     @staticmethod
-    def _stuff(*args, **kwargs):
+    def _stuff(*_args, **_kwargs):
         print("Stopping when current tasks are finished...")
 
 doNotRequestItem = False
@@ -534,7 +536,7 @@ def updateWS(ws):
         print("Connection closed by remote host.")
         sys.exit(0)
     else:
-        raise ValueError("Unsupported opcode sent from server: %d." % opcode)
+        raise ValueError(f"Unsupported opcode sent from server: {opcode}")
     item = data
     _ = json.loads(item)
     if type(_) == dict:
