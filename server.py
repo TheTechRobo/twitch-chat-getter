@@ -152,6 +152,7 @@ def message_receivedd(client, server, message):
         client['handler'].send_close(1001, b"Server going down")
     if len(message) > 4*1024*1024: # 2 MiB
         client['handler'].send_close(1009, b"Max msg size is 1Mb")
+        return
     try:
         msg = json.loads(message)
     except Exception:
@@ -162,6 +163,8 @@ def message_receivedd(client, server, message):
         conn = r.connect()
         result = r.db("twitch").table("secrets").get(auth).run(conn)
         if result:
+            if result.get("kick"):
+                client['handler'].send_close(1008, result['Kreason'].encode("utf-8"))
             print("Client", client, clients.get(client['id']), "auth'd.")
             clients[client['id']]['auth'] = True
         else:
