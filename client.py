@@ -108,7 +108,7 @@ class DownloadData(Task):
             # so we're not losing any data by doing this.
             # Some items were failing due to a too-long filename.
             # ext4 limits it to 255 chars, but let's play it safe.
-            "--trim-filenames", "200"
+            "--trim-filenames", "200",
             # Some VODs return a 403 on the m3u8, so format data
             # will be missing on those ones since we're stifling the errors.
             # Better than getting nothing, though
