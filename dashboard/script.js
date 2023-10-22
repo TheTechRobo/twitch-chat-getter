@@ -1,11 +1,13 @@
-function genTop(item, id, size, req, dateStarted, author, explain) {
+function genTop(item, id, size, req, dateStarted, author, explain, dateClaimed) {
 	let top = document.createElement("div");
 	top.id = `top-${id}`;
 	let isoString = new Date(dateStarted).toISOString().slice(0, 10);
+	let claimedString = new Date(dateClaimed).toISOString().slice(0, 10);
 	let prettyTS = `queued <abbr title="${new Date(dateStarted).toISOString()}">${isoString}</abbr>`;
+	let prettyClaimed = `claimed <abbr title="${new Date(dateClaimed).toISOString()}">${claimedString}</abbr>`;
 	let prettyMiB = `${(size/1024/1024).toFixed(1)} MiB`;
 	let prettyReqs = `${req} requests`;
-	let dataToAdd = {item: item, author: `for ${author}`, dateStarted: prettyTS, id: id, explain: explain};
+	let dataToAdd = {item: item, author: `for ${author}`, dateStarted: prettyTS, dateClaimed: prettyClaimed, id: id, explain: explain};
 	Object.keys(dataToAdd).forEach((i) => {
 		let item = document.createElement("div");
 		item.classList.add("pure-u-1-6");
@@ -17,12 +19,12 @@ function genTop(item, id, size, req, dateStarted, author, explain) {
 
 current_cards = {};
 
-function createJobCard(item, id, ts, author, explain, ctask) {
+function createJobCard(item, id, ts, author, explain, ctask, dateClaimed) {
 	let card = document.createElement("div");
 	card.id = `card-${id}`;
 	card.classList.add("card");
 
-	let top = genTop(item, id, 0, 0, ts, author, explain);
+	let top = genTop(item, id, 0, 0, ts, author, explain, dateClaimed);
 	card.appendChild(top);
 	let log = document.createElement("div");
 	log.id = `log-${id}`;
@@ -51,7 +53,7 @@ function addLogEntry(id, entry) {
 	let log = document.getElementById(current_cards[id]).querySelector(".log");
 	log.appendChild(opt);
 	if (!log.nothing) {
-		log.scroll(0, 32423482374983274293878)
+		log.scroll(0, 2100000)
 	}
 }
 
@@ -75,7 +77,7 @@ function makeWS() {
 				addLogEntry(id, msg.data);
 			} else {
 				let deets = msg.deets;
-				createJobCard(deets.item, id, deets.ts, deets.author, deets.explanation, deets.ctask);
+				createJobCard(deets.item, id, deets.ts*1000, deets.author, deets.explanation, deets.ctask, deets.started_ts*1000);
 			}
 		} else if (msg.type == "status") {
 			let id = msg.id;

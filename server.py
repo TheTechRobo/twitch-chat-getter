@@ -300,7 +300,7 @@ def message_receivedd(client, server, message):
         conn = r.connect()
         item = r.db("twitch").table("todo").get(msg['item']).run(conn)
         conn.close()
-        msg['deets'] = {"item": item['item'], "ts": item['queued_at'], "author": item['started_by'], "ctask": item.get("ctask"), "explanation": item['explain']}
+        msg['deets'] = {"item": item['item'], "ts": item['queued_at'], "author": item['started_by'], "ctask": item.get("ctask"), "explanation": item['explain'], "started_ts": item['claimed_at']}
         try:
             for cl in WEB_CLIENTS:
                 server.send_message(cl, json.dumps(msg))

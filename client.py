@@ -322,12 +322,12 @@ def run_warcprox_tail(stop, ws, id):
     with open("warcprox__log.log") as f:
         for i in nonblocking_readlines(f):
             if not i:
+                if stop.is_set():
+                    return
                 time.sleep(0.4)
                 continue
             ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
             print(i, file=sys.stdout.old, end="")
-            if stop.is_set():
-                return
 
 def get_next_message(webSocket, wanted_type=None):
     data = {"type": "godot"}
