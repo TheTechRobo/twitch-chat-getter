@@ -14,6 +14,10 @@
    limitations under the License.
 """
 
+# Update this whenever you make a non-cosmetic change.
+# It will be stored in the WARC file and sent to the tracker.
+VERSION = "20231022.01"
+
 import atexit, time
 
 @atexit.register
@@ -77,7 +81,7 @@ class DownloadData(Task):
         file_hash = ""
         with open(__file__, "rb") as file:
             file_hash = hashlib.sha256(file.read()).hexdigest()
-        assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s" % file_hash).status_code == 204
+        assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s v:%s" % (file_hash, VERSION)).status_code == 204
         self.ws.send(json.dumps({"type": "ping"}))
 
     def _kill_warcprox(self, pid, sig="INT"):
@@ -117,7 +121,7 @@ class DownloadData(Task):
             # yt-dlp chat extraction is currently broken, so let's not make it crash
             #"--embed-subs", "--all-subs",
             # Limit speed and put the infojson in a specific file
-            "--limit-rate", "300k", "-o", "infojson:%(id)s",
+            "--limit-rate", "300k", "-o", "%(id)s.%(ext)s",
             "--proxy", "http://localhost:" + self.WARCPROX_PORT,
             "https://twitch.tv/videos/" + item
         ], ws)
@@ -221,7 +225,8 @@ class DownloadData(Task):
                 print(traceback.format_exc())
                 print("---------------")
             try:
-                self._kill_warcprox(self.warcprox_pid)
+                self._kill_warcprox(self.process.pid)
+                self.process.wait()
             except Exception:
                 print("Couldnt kill warcprox lol")
                 print(traceback.format_exc())
@@ -581,8 +586,7 @@ def mainloop():
     # init
     ws = websocket.WebSocket()
     ws.connect(os.environ["CONNECT"])
-    ws.send(json.dumps({"type": "afternoon"}))
-    ws.send(json.dumps({"type": "auth", "method": "secret", "auth": secret}))
+    ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
     ws.send(json.dumps({"type": "ping"}))
     assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
     pipeline = Pipeline(
