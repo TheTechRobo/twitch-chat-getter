@@ -58,7 +58,7 @@ function addLogEntry(id, entry) {
 }
 
 function makeWS() {
-	let ENDPOINT = "ws://192.168.2.248:6969";
+	let ENDPOINT = "/ws-subscribe";
 	let sock = new WebSocket(ENDPOINT);
 	sock.addEventListener("open", (event) => {
 		sock.send(JSON.stringify({type: "subscribe", auth: "hunter2"}));
