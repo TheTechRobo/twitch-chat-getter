@@ -301,15 +301,21 @@ def message_receivedd(client, server, message):
         item = r.db("twitch").table("todo").get(msg['item']).run(conn)
         conn.close()
         msg['deets'] = {"item": item['item'], "ts": item['queued_at'], "author": item['started_by'], "ctask": item.get("ctask"), "explanation": item['explain']}
-        for cl in WEB_CLIENTS:
-            server.send_message(cl, json.dumps(msg))
+        try:
+            for cl in WEB_CLIENTS:
+                server.send_message(cl, json.dumps(msg))
+        except Exception:
+            pass
         return
     if msg['type'] == "status":
         conn = r.connect()
         r.db("twitch").table("todo").get(msg['id']).update({"ctask": msg['task']}).run(conn)
         conn.close()
-        for cl in WEB_CLIENTS:
-            server.send_message(cl, json.dumps(msg))
+        try:
+            for cl in WEB_CLIENTS:
+                server.send_message(cl, json.dumps(msg))
+        except Exception:
+            pass
         return
     if msg["type"] == "get":
         if STOP_FLAG.is_set():
@@ -351,8 +357,11 @@ def message_receivedd(client, server, message):
         else:
             reply(user, f"Your job {ident} for {item} has finished.")
         del clients[client['id']]['tasks'][item]
-        for cl in WEB_CLIENTS:
-            server.send_message(cl, json.dumps(msg))
+        try:
+            for cl in WEB_CLIENTS:
+                server.send_message(cl, json.dumps(msg))
+        except Exception:
+            pass
     elif msg["type"] == "feed":
         item = msg['item']
         item_for = msg['item_for']
