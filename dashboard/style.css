@@ -1,0 +1,35 @@
+body {
+background: rgb(2,0,36);
+/*background: linear-gradient(90deg, rgba(2,0,36,1) 0%, rgba(9,9,121,1) 100%);
+*/
+	color: white;
+	overflow-y: scroll;
+}
+
+.card {
+	position: relative;
+	height: 15em;
+	margin-bottom: 5%;
+}
+
+.ts-map {
+	background: rgb(16,54,21);
+	background: linear-gradient(90deg, rgba(16,54,21,1) 0%, rgba(54,255,0,1) 100%);
+	width: 100%;
+}
+
+.log {
+	overflow-y: scroll;
+	background: rgb(0,0,0);
+	height: 85%;
+}
+.log > option {
+	margin-left: 2%;
+	margin-right: 2%;
+}
+
+.shadow {
+	-webkit-box-shadow: inset gray 0px 0px 60px -5px; 
+	-moz-box-shadow: inset gray 0px 0px 60px -5px; 
+	box-shadow: inset gray 0px 0px 60px -5px;
+}

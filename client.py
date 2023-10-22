@@ -26,7 +26,7 @@ def wait_on_exit():
     time.sleep(20)
 
 import websocket, json, os, sys, subprocess, shutil, os, os.path, base64
-import hashlib, traceback, signal, collections, struct, hashlib, logging
+import hashlib, traceback, signal, collections, struct, hashlib, logging, fcntl
 import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
 
 secret = os.environ['SECRET']
@@ -73,10 +73,18 @@ class DownloadData(Task):
         ], start_new_session=True, stdout=self.warcprox_log, stderr=self.warcprox_log)
         self.warcprox_pid = self.process.pid
 
+    def _run_warcprox_tail(self):
+        print("Starting tail...")
+        self.tailStop = threading.Event()
+        self.tail: threading.Thread = threading.Thread(target=run_warcprox_tail, args=(self.tailStop, self.ws, self.id), daemon=True)
+        self.tail.start()
+        print("Thread!!!", self.tail)
+
     def _start_warcprox(self):
         print("Starting warcprox...")
         self.WARCPROX_PORT = "4553"
         self._run_warcprox()
+        self._run_warcprox_tail()
         time.sleep(4)
         file_hash = ""
         with open(__file__, "rb") as file:
@@ -219,6 +227,14 @@ class DownloadData(Task):
             self._run(*args, **kwargs)
         finally:
             try:
+                print("Stopping Tail Thread")
+                self.tailStop.set()
+                print("Joining Tail Thread")
+                self.tail.join()
+                print("Joined Tail Thread")
+            except Exception as ename:
+                print("...Failed.", json.dumps(traceback.format_exc()))
+            try:
                 self.warcprox_log.close()
             except Exception:
                 print("Could not close file")
@@ -273,6 +289,46 @@ class MoveFiles(Task):
         else:
             raise ValueError("unsupported item type")
 
+def nonblocking_readlines(file):
+    print("START NONBL")
+    fd = file.fileno()
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fl |= os.O_NONBLOCK
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl)
+    buffer = bytearray()
+    while True:
+        try:
+            block = os.read(fd, 8192)
+        except BlockingIOError:
+            yield ""
+            continue
+
+        if not block:
+            yield ""
+            continue
+
+        buffer.extend(block)
+
+        while True:
+            n = buffer.find(b"\n")
+            if n == -1:
+                # No newlines yet
+                break
+            # Get the data
+            yield buffer[:n+1].decode(errors="backslashreplace")
+            buffer = buffer[n+1:]
+
+def run_warcprox_tail(stop, ws, id):
+    with open("warcprox__log.log") as f:
+        for i in nonblocking_readlines(f):
+            if not i:
+                time.sleep(0.4)
+                continue
+            ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
+            print(i, file=sys.stdout.old, end="")
+            if stop.is_set():
+                return
+
 def get_next_message(webSocket, wanted_type=None):
     data = {"type": "godot"}
     while data['type'] == "godot":
@@ -286,7 +342,7 @@ def get_next_message(webSocket, wanted_type=None):
             print("Unknown opcode.\nData:" % [opcode, data])
             sys.exit(5)
     if wanted_type:
-        assert data['type'] == wanted_type
+        assert data['type'] == wanted_type, f"Bad type for {data}."
     return data
 
 
@@ -417,36 +473,46 @@ class Logger:
     def __init__(self, prefix, old):
         self.prefix = prefix
         self.old = old
+        self.ws = None
+        self.item = None
+        self.LOG_STUFF = False
 
     def write(self, message):
         if message.strip():
             # print likes to do a separate call for its `end` parameter
-            logging.info(f"{self.prefix} {message.rstrip()}")
-            print(message, file=self.old)
+            if self.LOG_STUFF:
+                logging.info(f"{self.prefix} {message.rstrip()}")
+            if self.ws:
+                self.ws.send(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
+        print(message, file=self.old, end="")
 
     def flush(self):
-        pass
+        self.old.flush()
 
 class RedirectStdout(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         # This is a really shitty solution, but I'd rather not have to change all the print statements.
+        sys.stdout.ws = self.ws
+        sys.stdout.item = id
         logging.basicConfig(filename=os.path.join(ctx['folder'], "btt.log"), level=logging.DEBUG,
                 format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)",
                 force=True
         )
         ctx['logfile'] = os.path.join(ctx['folder'], "btt.log")
-        ctx['soutback'] = sys.stdout
-        # Redirecting stderr seems to cause issues with excpetion handling
-        #ctx['serrback'] = sys.stderr
-        sys.stdout = Logger("PRINT", ctx['soutback'])
-        #sys.stderr = Logger("PERR ", ctx['serrback'])
-        assert sys.stdout is not ctx['soutback'], "They're the same picture."
-        print(sys.stdout, ctx['soutback'])
+        sys.stdout.LOG_STUFF = True
+
+sys.stdbak = sys.stdout
+sys.stdout = Logger("PRINT", sys.stdbak)
+# TODO: Redirect stderr?
 
 class RecoverStdout(Task):
+    def run(self, _item, _itemType, _author, _id, _full, _queued_for, _ctx):
+        sys.stdout.LOG_STUFF = False
+
+class FinalCleanup(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
-        sys.stdout = ctx['soutback']
-        assert sys.stdout is ctx['soutback'], "wtf???"
+        sys.stdout.ws = None
+        sys.stdout.item = None
 
 class Pipeline:
     tasks: list[Task] = []
@@ -467,7 +533,7 @@ class Pipeline:
                 item = item[1:]
             for task in self.tasks:
                 cls = task.__class__
-                ws.send(json.dumps({"type": "status", "task": cls.__name__}))
+                ws.send(json.dumps({"type": "status", "task": cls.__name__, "id": ident}))
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
                 task.run(item, itemType, author, ident, full, queuedFor, ctx)
                 ws.send(json.dumps({"type": "ping"}))
@@ -597,7 +663,8 @@ def mainloop():
         RecoverStdout,
         MoveFiles,
         UploadData,
-        DeleteDirectories
+        DeleteDirectories,
+        FinalCleanup
     ) # later we need to do things like put warcprox in its own task
     # tini
     while True:

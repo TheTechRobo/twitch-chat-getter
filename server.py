@@ -66,6 +66,10 @@ def client_left(client, _server):
 
 # Called for every client disconnecting
 def client_leftt(client, _server):
+    if client in WEB_CLIENTS:
+        WEB_CLIENTS.remove(client)
+    if not client.get("auth"):
+        return
     for (item, author) in clients[client['id']]['tasks'].values():
         reply(author, f"Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
         client['reason'] = "disconnect"
@@ -146,6 +150,8 @@ def message_received(*args, **kwargs):
     finally:
         A_LOCK_OR_SOMETHING.release()
 
+WEB_CLIENTS = []
+
 # Called when a client sends a message
 def message_receivedd(client, server, message):
     if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
@@ -156,6 +162,8 @@ def message_receivedd(client, server, message):
     try:
         msg = json.loads(message)
     except Exception:
+        print("Could not parse", msg)
+        client['handler'].send_close(1008, b"Could not parse that message")
         return "Fail"
     if auth := msg.get("auth"):
         if clients[client['id']].get("untrusted"):
@@ -165,6 +173,12 @@ def message_receivedd(client, server, message):
         if result:
             if result.get("kick"):
                 client['handler'].send_close(1008, result['Kreason'].encode("utf-8"))
+                return
+            if result.get("web"):
+                clients[client['id']]['auth'] = False
+                clients[client['id']]['untrusted'] = True
+                WEB_CLIENTS.append(client)
+                return
             print("Client", client, clients.get(client['id']), "auth'd.")
             clients[client['id']]['auth'] = True
         else:
@@ -178,6 +192,13 @@ def message_receivedd(client, server, message):
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
         return
+    if msg['type'] == "afternoon":
+        version = msg.get("version")
+        if not version:
+            client['handler'].send_close(1008, b"A version is required")
+            clients[client['id']]['auth'] = False
+            return
+        client['version'] = version
     if not clients[client['id']]['auth']:
         # Ignore their messages if they are not authenticated
         # maybe they'll be delayed by thinking it's a bad connection
@@ -275,6 +296,21 @@ def message_receivedd(client, server, message):
         message = {"type": "upload_status", "status": response['status']}
         server.send_message(client, json.dumps(message))
         return
+    if msg['type'] == "WLOG":
+        conn = r.connect()
+        item = r.db("twitch").table("todo").get(msg['item']).run(conn)
+        conn.close()
+        msg['deets'] = {"item": item['item'], "ts": item['queued_at'], "author": item['started_by'], "ctask": item.get("ctask"), "explanation": item['explain']}
+        for cl in WEB_CLIENTS:
+            server.send_message(cl, json.dumps(msg))
+        return
+    if msg['type'] == "status":
+        conn = r.connect()
+        r.db("twitch").table("todo").get(msg['id']).update({"ctask": msg['task']}).run(conn)
+        conn.close()
+        for cl in WEB_CLIENTS:
+            server.send_message(cl, json.dumps(msg))
+        return
     if msg["type"] == "get":
         if STOP_FLAG.is_set():
             message = {"type": "item", "item": "", "started_by": "", "suppl": "NO_NEW_SERVES"}
@@ -315,6 +351,8 @@ def message_receivedd(client, server, message):
         else:
             reply(user, f"Your job {ident} for {item} has finished.")
         del clients[client['id']]['tasks'][item]
+        for cl in WEB_CLIENTS:
+            server.send_message(cl, json.dumps(msg))
     elif msg["type"] == "feed":
         item = msg['item']
         item_for = msg['item_for']
