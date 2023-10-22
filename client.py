@@ -605,7 +605,7 @@ def updateWS(ws):
         print("Server responded with CLOSE frame.\n"
                 "Reason: %d %s" % (code, data[2:].decode()))
         print("Connection closed by remote host.")
-        sys.exit(0)
+        sys.exit(10)
     else:
         raise ValueError(f"Unsupported opcode sent from server: {opcode}")
     item = data
