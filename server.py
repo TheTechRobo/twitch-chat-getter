@@ -99,7 +99,7 @@ def run_uploader_pipeline(uuid, dirname, chan, handler):
                 ("SET_DIRNAME_TO_SUBDIRECTORY", "UPDATING_VARS"),
                 ("./extract_urls.zsh", "EXTRACTING_URLS"),
                 ("./tarrer.zsh", "TARRING_DIRECTORY"),
-                #(["./upload_to_ia.zsh", "{dirname}", chan], "UPLOADING_TO_IA")
+                (["./upload_to_ia.zsh", "{dirname}", chan], "UPLOADING_TO_IA")
         )
         for thing, status in things_to_do:
             print(thing, status)
