@@ -31,6 +31,7 @@ import tempfile
 import concurrent.futures as futures
 import subprocess
 import random
+import logging
 
 from itertools import permutations
 
@@ -43,12 +44,15 @@ import requests
 from websocket_server import WebsocketServer
 from rethinkdb import r
 
-# Called for every client connecting (after handshake)
+logging.basicConfig(filename="server.log", format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)", level=logging.DEBUG)
+logging.info("Server Starting")
+
+logging.debug("Defining functions")
+
 def new_client(client, server):
     CLIENTS_DISCONNECTED.clear()
-    print("New client connected and was given id %d" % client['id'])
-    server.send_message(client, """
-            {"type":"godot", "method":"ping"}""")
+    logging.info("New client connected and was given id %d" % client['id'])
+    server.send_message(client, '{"type":"godot", "method":"ping"}')
     A_LOCK_OR_SOMETHING.acquire()
     try:
         client["auth"] = False
@@ -66,9 +70,17 @@ def client_left(client, _server):
 
 # Called for every client disconnecting
 def client_leftt(client, _server):
+    if not client:
+        logging.warning("Unknown client data, returning")
+        return
     if client in WEB_CLIENTS:
+        logging.debug("Disabling web client")
         WEB_CLIENTS.remove(client)
+        if clients[client['id']].get("tasks"):
+            logging.warning("Web client %s has tasks on disconnection!", client)
+        return
     if not client.get("auth"):
+        logging.debug("Client was not authed, returning")
         return
     for (item, author) in clients[client['id']]['tasks'].values():
         reply(author, f"Your item {item['id']} for {item['item']} failed. (Reason: Client disconnected)")
@@ -76,16 +88,18 @@ def client_leftt(client, _server):
         client['moved_at'] = time.time()
         e = r.db("twitch").table("error").insert(r.db("twitch").table("todo").get(item['id']).run(conn)).run(conn)
         if e['errors']:
-            reply("TheTechRobo", "D1F.")
+            logging.warning(f"D1F: Could not move outstanding item {item} out of {clients[client['id']]['tasks']}, returning")
+            reply("TheTechRobo", "Failed to move item from disconnecting client. Check logs for D1F.")
             raise ValueError(e)
         e = r.db("twitch").table("todo").get(item['id']).delete(return_changes=True).run(conn)
         if e['errors']:
-            reply(f"{author}, TheTechRobo", "Could not remove item from todo. Check logs.")
+            logging.warning(f"D2F: Could not remove outstanding item {item} out of todo. Further items: {clients[client['id']]['tasks']}")
+            reply(f"{author}, TheTechRobo", "Could not remove item from todo. Check logs for D2F.")
             raise ValueError(e)
     del clients[client['id']]
     if not clients:
         CLIENTS_DISCONNECTED.set()
-    print(f"Client({client['id']}) disconnected")
+    logging.info(f"Client({client['id']}) disconnected")
 
 pool = futures.ThreadPoolExecutor(max_workers=2)
 
@@ -154,37 +168,41 @@ WEB_CLIENTS = []
 
 # Called when a client sends a message
 def message_receivedd(client, server, message):
+    if not clients.get(client['id']):
+        logging.warning(f"Nonexistent or disconnected client {client} sent message {message}")
     if not clients[client['id']]['tasks'] and DISCONNECT_CLIENTS.is_set():
         client['handler'].send_close(1001, b"Server going down")
-    if len(message) > 4*1024*1024: # 2 MiB
-        client['handler'].send_close(1009, b"Max msg size is 1Mb")
+    if len(message) > 4*1024*1024:
+        client['handler'].send_close(1009, b"Message too large")
         return
     try:
         msg = json.loads(message)
     except Exception:
-        print("Could not parse", msg)
-        client['handler'].send_close(1008, b"Could not parse that message")
+        logging.warning(f"Could not parse {message} from {client}")
+        client['handler'].send_close(1008, b"Unable to parse your message")
         return "Fail"
     if auth := msg.get("auth"):
         if clients[client['id']].get("untrusted"):
+            logging.warning("HEADS UP: Untrusted client attempted an auth.")
             return
         conn = r.connect()
         result = r.db("twitch").table("secrets").get(auth).run(conn)
         if result:
             if result.get("kick"):
                 client['handler'].send_close(1008, result['Kreason'].encode("utf-8"))
+                logging.info("Kicking kickable client")
                 return
             if result.get("web"):
+                logging.info("New web client just dropped")
                 clients[client['id']]['auth'] = False
                 clients[client['id']]['untrusted'] = True
                 WEB_CLIENTS.append(client)
                 return
-            print("Client", client, clients.get(client['id']), "auth'd.")
+            logging.info(f"Client {client} {clients.get(client['id'])} auth'd.")
             clients[client['id']]['auth'] = True
         else:
             reply("TheTechRobo", "Received an unrecognised password.")
-            print(f"Wrong password - received {auth}")
-            print("Client:", client, clients.get(client['id']))
+            logging.error(f"Wrong password - received {auth} from {client}")
             clients[client['id']]['untrusted'] = True
         del conn, result, auth
     if msg["type"] ==   "ping":
@@ -195,7 +213,7 @@ def message_receivedd(client, server, message):
     if msg['type'] == "afternoon":
         version = msg.get("version")
         if not version:
-            client['handler'].send_close(1008, b"A version is required")
+            client['handler'].send_close(1008, b"A version is required. Please ensure your container is up to date.")
             clients[client['id']]['auth'] = False
             return
         client['version'] = version
@@ -218,12 +236,13 @@ def message_receivedd(client, server, message):
         # Load disk space
         DATA_DIR = "data"
         free_space = shutil.disk_usage(DATA_DIR).free
-        if (msg['approxSize'] * 4) > free_space:
+        if (msg['approxSize'] * 7) > free_space:
+            logging.warning(f"Out of space for client {client}")
             message = {"type": "nak", "reason": "Free space check failed"}
             server.send_message(client, json.dumps(message))
             return
         dirname = tempfile.mkdtemp(prefix="UPLOAD_TMP_", dir=DATA_DIR)
-        print(dirname)
+        print("Temp dirname:", dirname)
         conn = r.connect()
         query_result = r.db("twitch").table("uploads").insert({
             "status": "PREFLIGHT",
@@ -271,7 +290,7 @@ def message_receivedd(client, server, message):
     if msg['type'] == "verify":
         dirname = clients[client['id']]['dirname']
         file = f"{dirname}/data.tgz"
-        # read up to 8MiB at a time
+        # read up to 16MiB at a time
         buffer_size = 16*1024*1024
         has = msg['hash']
         if has['type'] != "sha256":
@@ -284,8 +303,10 @@ def message_receivedd(client, server, message):
             while data := f.read(buffer_size):
                 sha.update(data)
         if sha.hexdigest() == payload:
+            logging.debug("Hash verify success!")
             message = {"type": "verify_result", "res": "match"}
         else:
+            logging.warning(f"Hash verify failed for {clients[client['id']]}")
             message = {"type": "verify_result", "res": "mismatch"}
         server.send_message(client, json.dumps(message))
         return
@@ -329,7 +350,7 @@ def message_receivedd(client, server, message):
                 clients[client['id']]['tasks'][item['item']] = ((item, author))
             server.send_message(client, json.dumps(item))
             if itemName:
-                print("Sent", itemName, "to client")
+                logging.debug(f"Sent {itemName} to client")
         except SyntaxError:
             client["handler"].send_close(1008, 'No Auth'.encode())
     elif msg["type"] == "warn":
@@ -409,6 +430,8 @@ def any_items_left(id, onlydone=True):
             or r.db("twitch").table("error").get(id).run(conn)
     return item_data['item'], items, error
 
+logging.debug("Defined globals. Starting WS Server...")
+
 PORT=int_or_none(os.getenv("WSPORT")) or 9001
 server = WebsocketServer(port=PORT, host="0.0.0.0")
 server.set_fn_new_client(new_client)
@@ -416,14 +439,16 @@ server.set_fn_client_left(client_left)
 server.set_fn_message_received(message_received)
 server.run_forever(True)
 
-print(f"Listening on port {PORT}.")
-print("Server is up and running.")
-print("Connecting to h2ibot...")
+logging.info("Listening on port %s.", PORT)
+print(f"Server is running on port {PORT}.")
+print("Connecting to h2ibot...", end="\r")
 
 STREAM_URL = os.environ["H2IBOT_STREAM_URL"]
 POST_URL   = os.environ["H2IBOT_POST_URL"]
 
 stream = requests.get(STREAM_URL, stream=True)
+
+print("Connection established.")
 
 def request_item(client):
     conn = r.connect()

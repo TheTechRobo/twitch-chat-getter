@@ -14,18 +14,27 @@
    limitations under the License.
 """
 
-# Update this whenever you make a non-cosmetic change.
-# It will be stored in the WARC file and sent to the tracker.
-VERSION = "20231022.01"
+# FIXME: Update this whenever you make a non-cosmetic change.
+# FIXME: It will be stored in the WARC file and sent to the tracker.
+VERSION = "20231206.01"
 
-import atexit, time
+import atexit, time, sys
+
+sys.stdout.flush()
+
+print("x=================x\n"
+      "|Container Started|\n"
+      "x=================x\n",
+      end="", flush=True)
+
+print("It is now", time.time(), "o'clock.", flush=True)
 
 @atexit.register
 def wait_on_exit():
     print("Waiting 20 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
     time.sleep(20)
 
-import websocket, json, os, sys, subprocess, shutil, os, os.path, base64
+import websocket, json, os, subprocess, shutil, os, os.path, base64
 import hashlib, traceback, signal, collections, struct, hashlib, logging, fcntl
 import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
 
@@ -326,7 +335,11 @@ def run_warcprox_tail(stop, ws, id):
                     return
                 time.sleep(0.4)
                 continue
-            ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
+            try:
+                ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
+            except Exception as ename:
+                print("Could not submit Warcprox Log, raising.", file=sys.stdout.old, flush=True)
+                raise
             print(i, file=sys.stdout.old, end="")
 
 def get_next_message(webSocket, wanted_type=None):
@@ -483,7 +496,10 @@ class Logger:
             if self.LOG_STUFF:
                 logging.info(f"{self.prefix} {message.rstrip()}")
             if self.ws:
-                self.ws.send(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
+                try:
+                    self.ws.send(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
+                except Exception:
+                    print("Failed to post message to server.", file=self.old)
         print(message, file=self.old, end="")
 
     def flush(self):
@@ -520,7 +536,6 @@ class Pipeline:
     def __init__(self, ws, *args):
         for task in args:
             self.tasks.append(task(print, ws))
-        print(self.tasks)
 
     def _start(self, item, ws, author, ident, full, queuedFor):
         ws.send(json.dumps({"type": "ping"}))
