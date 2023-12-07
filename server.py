@@ -181,6 +181,13 @@ def message_receivedd(client, server, message):
         logging.warning(f"Could not parse {message} from {client}")
         client['handler'].send_close(1008, b"Unable to parse your message")
         return "Fail"
+    if msg['type'] == "afternoon":
+        version = msg.get("version")
+        if not version:
+            client['handler'].send_close(1008, b"A version is required. Please ensure your container is up to date.")
+            clients[client['id']]['auth'] = False
+            return
+        client['version'] = version
     if auth := msg.get("auth"):
         if clients[client['id']].get("untrusted"):
             logging.warning("HEADS UP: Untrusted client attempted an auth.")
@@ -210,13 +217,6 @@ def message_receivedd(client, server, message):
         msg["method"] = "ping"
         server.send_message(client, json.dumps(msg))
         return
-    if msg['type'] == "afternoon":
-        version = msg.get("version")
-        if not version:
-            client['handler'].send_close(1008, b"A version is required. Please ensure your container is up to date.")
-            clients[client['id']]['auth'] = False
-            return
-        client['version'] = version
     if not clients[client['id']]['auth']:
         # Ignore their messages if they are not authenticated
         # maybe they'll be delayed by thinking it's a bad connection
