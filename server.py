@@ -836,11 +836,11 @@ for entry in cursor.run(conn):
 cursor = r.db("twitch").table("uploads").get_all(False, index="completed")
 
 for item in cursor.run(conn):
-    reply(None, f"Cleaning up unfinished upload {item['id']}.")
+    logging.info(f"Cleaning up unfinished upload {item['id']}.")
     try:
         shutil.rmtree(item['dir'])
     except FileNotFoundError:
-        reply(None, f"job upload {item['dir']} no longer exists..")
+        logging.warning(f"job upload {item['dir']} no longer exists..")
     assert r.db("twitch").table("uploads").get(item['id']).update({
         "PRE_MOVE_status": item['status'],
         "status": "FAILED",
