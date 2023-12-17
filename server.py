@@ -181,6 +181,11 @@ def message_receivedd(client, server, message):
         logging.warning(f"Could not parse {message} from {client}")
         client['handler'].send_close(1008, b"Unable to parse your message")
         return "Fail"
+    if not msg.get("type"):
+        logging.error(f"Client sent invalid message: {msg}")
+        client['handler'].send_close(1008, b"Unable to parse your message")
+        return
+    logging.debug(f"Client({client['id']}) sent message of type {msg['type']}")
     if msg['type'] == "afternoon":
         version = msg.get("version")
         if not version:
@@ -189,6 +194,7 @@ def message_receivedd(client, server, message):
             return
         client['version'] = version
     if auth := msg.get("auth"):
+        logging.debug(f"Authing client {client['id']}")
         if clients[client['id']].get("untrusted"):
             logging.warning("HEADS UP: Untrusted client attempted an auth.")
             return
@@ -205,7 +211,7 @@ def message_receivedd(client, server, message):
                 clients[client['id']]['untrusted'] = True
                 WEB_CLIENTS.append(client)
                 return
-            logging.info(f"Client {client} {clients.get(client['id'])} auth'd.")
+            logging.info(f"Client {client} {clients.get(client['id'])} auth'd with {result}.")
             clients[client['id']]['auth'] = True
         else:
             reply("TheTechRobo", "Received an unrecognised password.")
@@ -350,7 +356,7 @@ def message_receivedd(client, server, message):
                 clients[client['id']]['tasks'][item['item']] = ((item, author))
             server.send_message(client, json.dumps(item))
             if itemName:
-                logging.debug(f"Sent {itemName} to client")
+                logging.debug(f"Sent {itemName} to client {client}")
         except SyntaxError:
             client["handler"].send_close(1008, 'No Auth'.encode())
     elif msg["type"] == "warn":
@@ -409,7 +415,6 @@ def message_receivedd(client, server, message):
                 reply(user, f"Your job {e} for {ename} finished with errors.")
         except SyntaxError:
             client['handler'].send_close(1008, "No Auth".encode())
-    print("Client(%d) said: %s" % (client['id'], message))
 
 def int_or_none(string):
     try:
