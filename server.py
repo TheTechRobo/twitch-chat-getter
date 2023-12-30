@@ -778,12 +778,12 @@ class IrcBot:
         raise ValueError("first arg must be function or match")
 
     def parse_irc_line(self, line: dict):
-        user = line['user']
-        author = user['nick']
-        if author == "h2ibot":
-            return # don't process our own messages
         command = line['command']
         if command == "PRIVMSG":
+            user = line['user']
+            author = user['nick']
+            if author == "h2ibot":
+                return # don't process our own messages
             message = line['message']
             args = message.split(" ")
             print(f"[{arrow.Arrow.fromtimestamp(line['time']).format()}] <{author}> {message}")
