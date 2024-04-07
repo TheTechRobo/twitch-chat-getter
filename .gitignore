@@ -10,3 +10,5 @@ test/
 btt_upl
 /.env
 Tmp1/
+nohup.out
+server.py.bak
