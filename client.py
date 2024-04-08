@@ -94,7 +94,7 @@ class DownloadData(Task):
         self.WARCPROX_PORT = "4553"
         self._run_warcprox()
         self._run_warcprox_tail()
-        time.sleep(4)
+        time.sleep(6)
         file_hash = ""
         with open(__file__, "rb") as file:
             file_hash = hashlib.sha256(file.read()).hexdigest()
