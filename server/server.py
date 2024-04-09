@@ -1,4 +1,6 @@
-import asyncio, logging, uuid, json, traceback
+import asyncio, logging, json, traceback, os
+
+logging.basicConfig(level=logging.DEBUG, force=True)
 
 import websockets
 from rethinkdb import r
@@ -66,13 +68,14 @@ async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProto
             logging.warning("Client sent invalid message, closing connection")
             await websocket.close(1008, "Invalid message structure")
             break
-        logging.debug(f"Client {cid} sent a message of type {data['type']} and length {len(message)}")
+        logging.info(f"Client {cid} sent a message of type {data['type']} and length {len(message)}")
         # Base message types
         if auth := data.get("auth"):
-            logging.debug(f"Authenticating client {cid}")
+            logging.info(f"Authenticating client {cid}")
             if UNTRUSTED:
                 logging.warning(f"Untrusted client {cid} attempted to authenticate")
                 continue
+            CONN = await r.connect()
             result = await r.db("twitch").table("secrets").get(auth).run(CONN)
             if result:
                 if result.get("kick"):
@@ -86,6 +89,7 @@ async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProto
                     WEB = True
                     continue
                 logging.info(f"Client {cid} authed with {auth}.")
+                AUTHED = True
         if not AUTHED:
             logging.info(f"Client {cid} : message without proper auth")
             continue
@@ -94,8 +98,8 @@ async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProto
                 await websocket.close(1008, "No version provided. Please ensure your container is up to date.")
                 break
             logging.info(f"Welcome client {cid} with version {data['version']}!")
-            CONN = await r.connect()
             AFTERNOONED = True
+            await websocket.send('{"type": "godot", "method": "ping"}')
             continue
 
         if WEB or not AFTERNOONED:
@@ -108,14 +112,14 @@ async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProto
                 response = {"type": "item", "item": "", "started_by": None, "suppl": "UNFINISHED_ITEM"}
                 await websocket.send(json.dumps(response))
                 continue
-            if STOP_FLAG:
+            if STOP_FLAG.is_set():
                 response = {"type": "item", "item": "", "started_by": None, "suppl": "NO_NEW_SERVES"}
                 await websocket.send(json.dumps(response))
                 continue
             item = await request_item(CONN)
             if not item: item = {"type": "item", "item": "", "started_by": None}
             CURRENT_TASK = item['id']
-            logging.debug(f"Sending {item} to client {cid}")
+            logging.info(f"Sending {item} to client {cid}")
             await websocket.send(json.dumps(item))
             continue
 
@@ -124,22 +128,25 @@ async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProto
         await taskDisconnected(cid, CURRENT_TASK)
     logging.info(f"Lost connection to client {cid}")
 
-async def connectionHandlerWrapper(cid, websocket):
+async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol):
     global CURRENT_ID
     cid = CURRENT_ID
     CURRENT_ID += 1
-    logging.debug(f"Handling connection (cid: {cid})")
+    logging.info(f"Handling connection (cid: {cid})")
     try:
+        print("websocket", websocket)
         await connectionHandler(cid, websocket)
-    except Exception as ename:
+    except Exception:
         logging.error(f"Error occured during connection handler for client {cid}:")
         logging.error(repr(traceback.format_exc()))
+        await websocket.close(1011, "Internal Server Error")
         raise
     else:
-        logging.debug("Connection {cid} finished")
+        logging.info("Connection {cid} finished")
 
 async def main():
-    async with websockets.serve(connectionHandlerWrapper, "", 9876):
+    port = int(os.environ['WSPORT'])
+    async with websockets.serve(connectionHandlerWrapper, "", port):
         await asyncio.Future()
 
 
