@@ -1,4 +1,5 @@
 import asyncio, logging, json, traceback, os
+import typing
 
 logging.basicConfig(level=logging.DEBUG, force=True)
 
@@ -21,9 +22,11 @@ WEB_CLIENTS = []
 # Stop flag: Stops item serves if set
 STOP_FLAG: asyncio.Event = asyncio.Event()
 
-async def _get_item(conn, queue):
-    result = await r.db("twitch").table("todo").getAll("todo", index="status").sample(1) \
+async def _get_item(conn, queue: str):
+    result = await r.db("twitch").table("todo").get_all(queue, index="status").sample(1) \
         .update({"status": "claims"}, return_changes=True).run(conn)
+    if result['replaced'] == 0:
+        return None
     changes: list[dict] = result['changes']
     if not changes:
         return None
@@ -32,101 +35,184 @@ async def _get_item(conn, queue):
     logging.warning("DB returned invalid data")
     raise RuntimeError("RethinkDB checked out too many items.")
 
-async def request_item(conn):
+async def _request_item(conn):
+    if item := await _get_item(conn, "priority"):
+        return item
     if item := await _get_item(conn, "todo"):
         return item
-    if item := await _get_item(conn, "secondary"):
+    if item := await _get_item(conn, "backfeed"):
         return item
     if item := await _get_item(conn, "retry"):
         return item
+    if item := await _get_item(conn, "retry2"):
+        return item
     return None
 
-CURRENT_ID = 1
-async def connectionHandler(cid: int, websocket: websockets.WebSocketServerProtocol):
-    logging.info(f"New client {cid}")
-    CURRENT_TASK = None
-    AFTERNOONED = False
-    UNTRUSTED   = False
-    AUTHED      = False
-    WEB         = False
-    CONN        = None
-    async for message in websocket:
-        # Check length of message.
-        # Limited to 4 MiB because JSON memory usage is crazy.
-        if len(message) > 4*1024*1024:
-            logging.warning(f"Client sent message of length {len(message)}, closing connection")
-            await websocket.close(1009, "Message too large")
-            break
-        # Load message. If that doesn't work, close the connection.
+async def request_item():
+    conn = await r.connect()
+    try:
+        return await _request_item(conn)
+    finally:
         try:
-            data = json.loads(message)
-        except json.JSONDecodeError:
-            logging.warning("Client sent unparseable message, closing connection")
-            await websocket.close(1008, "JSON decode error")
-            break
-        if "type" not in data:
-            logging.warning("Client sent invalid message, closing connection")
-            await websocket.close(1008, "Invalid message structure")
-            break
-        logging.info(f"Client {cid} sent a message of type {data['type']} and length {len(message)}")
-        # Base message types
-        if auth := data.get("auth"):
-            logging.info(f"Authenticating client {cid}")
-            if UNTRUSTED:
-                logging.warning(f"Untrusted client {cid} attempted to authenticate")
-                continue
-            CONN = await r.connect()
-            result = await r.db("twitch").table("secrets").get(auth).run(CONN)
-            if result:
-                if result.get("kick"):
-                    await websocket.close(1008, result['Kreason'])
-                    logging.info(f"Kicking kickable client {cid} (secret used: {auth})")
-                    break
-                if result.get("web"):
-                    logging.info("New web client {cid} just dropped using authentication {auth}.")
-                    UNTRUSTED = True
-                    AUTHED = False
-                    WEB = True
-                    continue
-                logging.info(f"Client {cid} authed with {auth}.")
-                AUTHED = True
-        if not AUTHED:
-            logging.info(f"Client {cid} : message without proper auth")
-            continue
-        if data['type'] == "afternoon":
-            if not data.get("version"):
-                await websocket.close(1008, "No version provided. Please ensure your container is up to date.")
+            await conn.close()
+        except Exception:
+            pass
+
+CURRENT_ID = 1
+
+def int_or_none(s):
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+class ConnectionState:
+    CLOSED = -100
+    IGNORE = -1
+    START = 0
+    AUTHED = 1
+    READY = 2
+    TASK = 5
+    UPLOAD = 10
+
+NOPE = {"type": "item", "item": "", "started_by": None}
+
+class Connection:
+    def __init__(self, id: int, sock: websockets.WebSocketServerProtocol):
+        logging.info(f"New client {id}")
+
+        self.state = ConnectionState.START
+        self.web = False
+        self.conn = None
+        self.sock = sock
+        self.id = id
+        self.ctask = None
+
+        logging.info(f"Client {self.id} ready!")
+
+    def debug(self, msg):
+        logging.debug(f"Handler({self.id}): {msg}")
+
+    def info(self, msg):
+        logging.info(f"Handler({self.id}): {msg}")
+
+    def warning(self, msg):
+        logging.warning(f"Handler({self.id}): {msg}")
+
+    def error(self, msg):
+        logging.error(f"Handler({self.id}): {msg}")
+
+    async def run(self, expr, tries=3):
+        try:
+            conn = await r.connect()
+            return await expr.run(conn)
+        except Exception as e:
+            if tries > 0:
+                self.error(f"Error occured while querying DB ({repr(e)}), retrying")
+                return await self.run(expr, tries-1)
+            self.error(f"Error occured while querying DB ({repr(e)}), giving up")
+            raise
+
+    async def _start(self):
+        async for sm in self.sock:
+            # Ensure one client can't starve other coroutines of resources.
+            await asyncio.sleep(0)
+            # Load message. If that doesn't work, close the connection.
+            ml = len(sm)
+            try:
+                data = json.loads(sm)
+            except json.JSONDecodeError:
+                self.warning("Unparseable message, closing connection")
+                await self.sock.close(1008, "JSON decode error")
+                self.state = ConnectionState.CLOSED
                 break
-            logging.info(f"Welcome client {cid} with version {data['version']}!")
-            AFTERNOONED = True
-            await websocket.send('{"type": "godot", "method": "ping"}')
-            continue
+            if "type" not in data:
+                self.warning("Invalid message, closing connection")
+                await self.sock.close(1008, "Invalid message structure")
+                self.state = ConnectionState.CLOSED
+                break
+            mtype = data['type']
+            self.info(f"Message {mtype}({ml})")
 
-        if WEB or not AFTERNOONED:
-            logging.warning("Unauthorized client {cid} attempted a message")
-            break
+            if auth := data.get("auth"):
+                if self.state < ConnectionState.START: # untrusted, disconnected, etc
+                    self.warning(f"Untrusted client (state {self.state}) attempted to authenticate")
+                    continue
+                if self.state >= ConnectionState.AUTHED:
+                    self.warning(f"Already authed, reauthenticating")
+                self.info(f"Authenticating with {auth}")
+                result = await self.run(r.db("twitch").table("secrets").get(auth))
+                if result:
+                    if result.get("kick"):
+                        await self.sock.close(1008, result.get("Kreason", ""))
+                        self.warning(f"Kicking due to policy")
+                        self.state = ConnectionState.CLOSED
+                        break
+                    if result.get("web"):
+                        self.info("New web client just dropped")
+                        self.state = ConnectionState.IGNORE
+                        self.web = True
+                        WEB_CLIENTS.append(self)
+                    self.info("Authentication accepted")
+                    self.state = ConnectionState.AUTHED
+                else:
+                    self.warning("Access denied")
+                    self.state = ConnectionState.IGNORE
+                    continue
 
-        msgType = data['type']
-        if msgType == "get":
-            if CURRENT_TASK:
-                response = {"type": "item", "item": "", "started_by": None, "suppl": "UNFINISHED_ITEM"}
-                await websocket.send(json.dumps(response))
+            if self.state < ConnectionState.AUTHED:
+                self.warning("Message without authentication")
+
+            if mtype == "afternoon":
+                version = data.get("version")
+                if not version:
+                    self.warning("No version provided")
+                    await self.sock.close(1008, "Container is out of date.")
+                    break
+                self.info("Version: {version}")
+                self.state = ConnectionState.READY
                 continue
-            if STOP_FLAG.is_set():
-                response = {"type": "item", "item": "", "started_by": None, "suppl": "NO_NEW_SERVES"}
-                await websocket.send(json.dumps(response))
-                continue
-            item = await request_item(CONN)
-            if not item: item = {"type": "item", "item": "", "started_by": None}
-            CURRENT_TASK = item['id']
-            logging.info(f"Sending {item} to client {cid}")
-            await websocket.send(json.dumps(item))
-            continue
 
-    # We or the client disconnected
-    if CURRENT_TASK:
-        await taskDisconnected(cid, CURRENT_TASK)
-    logging.info(f"Lost connection to client {cid}")
+            if self.state < ConnectionState.READY:
+                self.warning("Client is too eager")
+                await self.sock.close(1008, "Container is out of date.")
+
+            # start READY block
+            if self.state == ConnectionState.READY:
+                if mtype == "get":
+                    if self.ctask:
+                        self.error("State contradiction (READY vs ctask); bailing out")
+                        # There should not be an item running in the READY state
+                        raise RuntimeError("State contradiction (READY vs ctask)")
+                    if STOP_FLAG.is_set():
+                        self.info("Stop flag is set")
+                        response = NOPE | {"suppl": "NO_NEW_SERVES"}
+                        await self.sock.send(json.dumps(response))
+                        continue
+                    try:
+                        item = await request_item()
+                    except Exception as ename:
+                        self.error(f"Error when requesting item: {repr(ename)}")
+                        response = NOPE | {"suppl": "ERROR"}
+                        await self.sock.send(json.dumps(response))
+                        continue
+                    if not item:
+                        self.info("No items found")
+                        item = NOPE
+                    self.ctask = item['id']
+                    self.info(f"Sending {item} to client")
+                    await self.sock.send(json.dumps(item))
+                    self.state = ConnectionState.TASK
+                    continue
+            # end READY block
+        # end loop
+        if task := self.ctask:
+            await taskDisconnected(self.id, task)
+        self.ctask = None
+        self.info("Connection lost")
+
+    async def start(self):
+        await self._start()
 
 async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol):
     global CURRENT_ID
@@ -134,20 +220,33 @@ async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol
     CURRENT_ID += 1
     logging.info(f"Handling connection (cid: {cid})")
     try:
-        print("websocket", websocket)
-        await connectionHandler(cid, websocket)
+        conn = Connection(cid, websocket)
+    except Exception:
+        logging.error(f"Can't make connection handler for client {cid}")
+        await websocket.close(1011, "Internal Server Error")
+        raise
+    try:
+        await conn.start()
     except Exception:
         logging.error(f"Error occured during connection handler for client {cid}:")
         logging.error(repr(traceback.format_exc()))
+        if task := conn.ctask:
+            logging.info(f"Failing item {task} because {cid} disconnected")
+            await taskDisconnected(cid, task)
         await websocket.close(1011, "Internal Server Error")
         raise
-    else:
-        logging.info("Connection {cid} finished")
+    logging.info("Connection {cid} finished")
+
+STOP_SERVER = asyncio.Future()
 
 async def main():
     port = int(os.environ['WSPORT'])
-    async with websockets.serve(connectionHandlerWrapper, "", port):
-        await asyncio.Future()
+    async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16):
+        try:
+            await STOP_SERVER
+        except KeyboardInterrupt:
+            STOP_FLAG.set()
+            await STOP_SERVER
 
 
 if __name__ == "__main__":
