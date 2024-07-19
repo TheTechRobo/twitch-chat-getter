@@ -1,7 +1,10 @@
 import asyncio, logging, json, traceback, os
-import typing
+import typing, random, signal
 
-logging.basicConfig(level=logging.DEBUG, force=True)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG, format="# [%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)", encoding="utf-8", errors="backslashreplace")
+
+logger.info("> Begin new log session")
 
 import websockets
 from rethinkdb import r
@@ -14,13 +17,15 @@ async def failItem(task, reason):
 async def taskDisconnected(cid, task):
     # Fail the item
     id = task['id']
-    logging.info(f"Client {cid} disconnected while working on item {id}")
+    logger.info(f"Client {cid} disconnected while working on item {id}")
     await failItem(task, "Client disconnected")
 
 WEB_CLIENTS = []
 
-# Stop flag: Stops item serves if set
+# Stop flag: Stops item serves if set. Used when the server is shutting down
 STOP_FLAG: asyncio.Event = asyncio.Event()
+# Pause flag: Stops item serves if set. Set manually by the IRC bot
+PAUSE_FLAG = asyncio.Event()
 
 async def _get_item(conn, queue: str):
     result = await r.db("twitch").table("todo").get_all(queue, index="status").sample(1) \
@@ -32,20 +37,18 @@ async def _get_item(conn, queue: str):
         return None
     if len(changes) == 1:
         return changes[0]['old_val']
-    logging.warning("DB returned invalid data")
+    logger.warning("DB returned invalid data")
     raise RuntimeError("RethinkDB checked out too many items.")
 
+# Queues earlier in this list will be drained before queues later in the list.
+# When an item fails and is retried, it is placed in the next queue.
+# (If there is no queue to move it to, the item is not moved.)
+QUEUES = ["priority", "todo", "backfeed", "aux", "aux2"]
+
 async def _request_item(conn):
-    if item := await _get_item(conn, "priority"):
-        return item
-    if item := await _get_item(conn, "todo"):
-        return item
-    if item := await _get_item(conn, "backfeed"):
-        return item
-    if item := await _get_item(conn, "retry"):
-        return item
-    if item := await _get_item(conn, "retry2"):
-        return item
+    for queue in QUEUES:
+        if item := await _get_item(conn, queue):
+            return item
     return None
 
 async def request_item():
@@ -79,7 +82,7 @@ NOPE = {"type": "item", "item": "", "started_by": None}
 
 class Connection:
     def __init__(self, id: int, sock: websockets.WebSocketServerProtocol):
-        logging.info(f"New client {id}")
+        logger.info(f"New client {id}")
 
         self.state = ConnectionState.START
         self.web = False
@@ -88,19 +91,28 @@ class Connection:
         self.id = id
         self.ctask = None
 
-        logging.info(f"Client {self.id} ready!")
+        # Try to prevent log injection
+        self.logcount = random.randint(0, 9)
+        logger.info(f"Handler({self.id}): Starting with log number {self.logcount}")
+
+        logger.info(f"Client {self.id} ready!")
 
     def debug(self, msg):
-        logging.debug(f"Handler({self.id}): {msg}")
+        if logger.isEnabledFor(logging.DEBUG):
+            self.logcount += 1
+            logger.debug(f"Handler({self.id})[{self.logcount}]: {msg}")
 
     def info(self, msg):
-        logging.info(f"Handler({self.id}): {msg}")
+        self.logcount += 1
+        logger.info(f"Handler({self.id})[{self.logcount}]: {msg}")
 
     def warning(self, msg):
-        logging.warning(f"Handler({self.id}): {msg}")
+        self.logcount += 1
+        logger.warning(f"Handler({self.id})[{self.logcount}]: {msg}")
 
     def error(self, msg):
-        logging.error(f"Handler({self.id}): {msg}")
+        self.logcount += 1
+        logger.error(f"Handler({self.id})[{self.logcount}]: {msg}")
 
     async def run(self, expr, tries=3):
         try:
@@ -204,7 +216,28 @@ class Connection:
                     await self.sock.send(json.dumps(item))
                     self.state = ConnectionState.TASK
                     continue
+                else:
+                    self.warning(f"Message type {repr(mtype)} is not recognised in this context (READY)")
+                    response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
+                    await self.sock.send(json.dumps(response))
+                    continue
             # end READY block
+
+            # begin TASK block
+            elif self.state == ConnectionState.TASK:
+                if False:
+                    pass
+                else:
+                    self.warning(f"Message type {repr(mtype)} is not recognised in this context")
+                    response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
+                    await self.sock.send(json.dumps(response))
+                    continue
+            # end TASK block
+            else:
+                self.warning(f"Unknown state {self.state}")
+                response = {"type": "response", "response": "error", "reason": "internal_error"}
+                await self.sock.send(json.dumps(response))
+                continue
         # end loop
         if task := self.ctask:
             await taskDisconnected(self.id, task)
@@ -218,36 +251,47 @@ async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol
     global CURRENT_ID
     cid = CURRENT_ID
     CURRENT_ID += 1
-    logging.info(f"Handling connection (cid: {cid})")
+    logger.info(f"Handling connection (cid: {cid})")
     try:
         conn = Connection(cid, websocket)
     except Exception:
-        logging.error(f"Can't make connection handler for client {cid}")
+        logger.error(f"Can't make connection handler for client {cid}")
         await websocket.close(1011, "Internal Server Error")
         raise
     try:
         await conn.start()
     except Exception:
-        logging.error(f"Error occured during connection handler for client {cid}:")
-        logging.error(repr(traceback.format_exc()))
+        logger.error(f"Error occured during connection handler for client {cid}:")
+        logger.error(repr(traceback.format_exc()))
         if task := conn.ctask:
-            logging.info(f"Failing item {task} because {cid} disconnected")
+            logger.info(f"Failing item {task} because {cid} disconnected")
             await taskDisconnected(cid, task)
         await websocket.close(1011, "Internal Server Error")
         raise
-    logging.info("Connection {cid} finished")
+    logger.info("Connection {cid} finished")
 
-STOP_SERVER = asyncio.Future()
+STOP_SERVER = asyncio.Event()
+
+# I would use Task.cancel, but then we can't have the "press ctrl-c twice to exit" feature
+def signal_handler():
+    if STOP_SERVER.is_set():
+        print("Pressing Ctrl-C again won't do anything. What a waste of time.")
+        return
+    if STOP_FLAG.is_set():
+        print("Stopping immediately.")
+        STOP_SERVER.set()
+        return
+    print("> Press Ctrl-C again to stop immediately")
+    print("! Stopping when current tasks are complete...")
+    STOP_FLAG.set()
 
 async def main():
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
     port = int(os.environ['WSPORT'])
     async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16):
-        try:
-            await STOP_SERVER
-        except KeyboardInterrupt:
-            STOP_FLAG.set()
-            await STOP_SERVER
-
+        await STOP_SERVER.wait()
+    print("! The server has shut down!")
 
 if __name__ == "__main__":
     asyncio.run(main())
