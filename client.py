@@ -16,7 +16,7 @@
 
 # FIXME: Update this whenever you make a non-cosmetic change.
 # FIXME: It will be stored in the WARC file and sent to the tracker.
-VERSION = "20231206.01"
+VERSION = "20240719.01"
 
 import atexit, time, sys
 
@@ -147,15 +147,17 @@ class DownloadData(Task):
             file.write("[]") # workaround for chat_downloader only writing the file when there are messages
         print("Downloading chat")
         os.environ['CURL_CA_BUNDLE'] = "./file.pem"
-        open_and_wait([
-            shutil.which("chat_downloader"),
-            "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
-            "--logging", "warning",
-            "--interruptible_retry", "False",
-            "--proxy", "http://localhost:" + self.WARCPROX_PORT,
-            "https://twitch.tv/videos/" + item
-        ], ws)
-        del os.environ['CURL_CA_BUNDLE']
+        try:
+            open_and_wait([
+                shutil.which("chat_downloader"),
+                "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
+                "--logging", "warning",
+                "--interruptible_retry", "False",
+                "--proxy", "http://localhost:" + self.WARCPROX_PORT,
+                "https://twitch.tv/videos/" + item
+            ], ws)
+        finally:
+            del os.environ['CURL_CA_BUNDLE']
         ws.send('{"type": "ping"}')
 
     def _run_channel(self, item):
@@ -669,7 +671,9 @@ def mainloop():
     ws.connect(os.environ["CONNECT"])
     ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
     ws.send(json.dumps({"type": "ping"}))
-    assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
+    fj = ws.recv()
+    print(fj)
+    assert json.loads(fj)["type"] == "godot", "Incorrect server!"
     pipeline = Pipeline(
         ws,
         PrepareDirectories,
