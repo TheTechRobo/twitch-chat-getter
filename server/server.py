@@ -1,6 +1,8 @@
 import asyncio, logging, json, traceback, os
 import typing, random, signal
 
+from websockets.frames import CloseCode
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG, format="# [%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)", encoding="utf-8", errors="backslashreplace")
 
@@ -20,10 +22,11 @@ async def taskDisconnected(cid, task):
     logger.info(f"Client {cid} disconnected while working on item {id}")
     await failItem(task, "Client disconnected")
 
-WEB_CLIENTS = []
+# List of all handlers, including web clients
+HANDLERS: set["Connection"] = set()
 
 # Stop flag: Stops item serves if set. Used when the server is shutting down
-STOP_FLAG: asyncio.Event = asyncio.Event()
+DISCONNECT_CLIENTS: asyncio.Event = asyncio.Event()
 # Pause flag: Stops item serves if set. Set manually by the IRC bot
 PAUSE_FLAG = asyncio.Event()
 
@@ -78,18 +81,40 @@ class ConnectionState:
     TASK = 5
     UPLOAD = 10
 
-NOPE = {"type": "item", "item": "", "started_by": None}
+NOPE = {"type": "item", "item": "", "started_by": None, "id": None}
 
 class Connection:
+    @property
+    def id(self):
+        return self._id
+
+    @id.setter
+    def id(self):
+        raise TypeError("The `id` property is read-only")
+
+    @id.deleter
+    def id(self):
+        raise TypeError("The `id` property cannot be deleted")
+
+    def __hash__(self) -> int:
+        return self.id
+
     def __init__(self, id: int, sock: websockets.WebSocketServerProtocol):
         logger.info(f"New client {id}")
 
+        self.disconnected = False
         self.state = ConnectionState.START
         self.web = False
         self.conn = None
         self.sock = sock
-        self.id = id
+        # self._id is not mutable; *do not* change it.
+        # You will break everything if you change it outside of __init__.
+        # This is the direct return value of __hash__.
+        self._id = id
         self.ctask = None
+        self.busy = asyncio.Lock()
+
+        assert self not in HANDLERS
 
         # Try to prevent log injection
         self.logcount = random.randint(0, 9)
@@ -126,118 +151,130 @@ class Connection:
             raise
 
     async def _start(self):
+        if DISCONNECT_CLIENTS.is_set():
+            await self.sock.close(CloseCode.GOING_AWAY, "Not accepting new connections")
+            return
+
         async for sm in self.sock:
-            # Ensure one client can't starve other coroutines of resources.
-            await asyncio.sleep(0)
-            # Load message. If that doesn't work, close the connection.
-            ml = len(sm)
-            try:
-                data = json.loads(sm)
-            except json.JSONDecodeError:
-                self.warning("Unparseable message, closing connection")
-                await self.sock.close(1008, "JSON decode error")
-                self.state = ConnectionState.CLOSED
-                break
-            if "type" not in data:
-                self.warning("Invalid message, closing connection")
-                await self.sock.close(1008, "Invalid message structure")
-                self.state = ConnectionState.CLOSED
-                break
-            mtype = data['type']
-            self.info(f"Message {mtype}({ml})")
-
-            if auth := data.get("auth"):
-                if self.state < ConnectionState.START: # untrusted, disconnected, etc
-                    self.warning(f"Untrusted client (state {self.state}) attempted to authenticate")
-                    continue
-                if self.state >= ConnectionState.AUTHED:
-                    self.warning(f"Already authed, reauthenticating")
-                self.info(f"Authenticating with {auth}")
-                result = await self.run(r.db("twitch").table("secrets").get(auth))
-                if result:
-                    if result.get("kick"):
-                        await self.sock.close(1008, result.get("Kreason", ""))
-                        self.warning(f"Kicking due to policy")
-                        self.state = ConnectionState.CLOSED
-                        break
-                    if result.get("web"):
-                        self.info("New web client just dropped")
-                        self.state = ConnectionState.IGNORE
-                        self.web = True
-                        WEB_CLIENTS.append(self)
-                    self.info("Authentication accepted")
-                    self.state = ConnectionState.AUTHED
-                else:
-                    self.warning("Access denied")
-                    self.state = ConnectionState.IGNORE
-                    continue
-
-            if self.state < ConnectionState.AUTHED:
-                self.warning("Message without authentication")
-
-            if mtype == "afternoon":
-                version = data.get("version")
-                if not version:
-                    self.warning("No version provided")
-                    await self.sock.close(1008, "Container is out of date.")
+            async with self.busy:
+                if self.disconnected:
                     break
-                self.info("Version: {version}")
-                self.state = ConnectionState.READY
-                continue
 
-            if self.state < ConnectionState.READY:
-                self.warning("Client is too eager")
-                await self.sock.close(1008, "Container is out of date.")
+                # Ensure one client can't starve other coroutines of resources.
+                await asyncio.sleep(0)
 
-            # start READY block
-            if self.state == ConnectionState.READY:
-                if mtype == "get":
-                    if self.ctask:
-                        self.error("State contradiction (READY vs ctask); bailing out")
-                        # There should not be an item running in the READY state
-                        raise RuntimeError("State contradiction (READY vs ctask)")
-                    if STOP_FLAG.is_set():
-                        self.info("Stop flag is set")
-                        response = NOPE | {"suppl": "NO_NEW_SERVES"}
+                # Load message. If that doesn't work, close the connection.
+                ml = len(sm)
+                try:
+                    data = json.loads(sm)
+                except json.JSONDecodeError:
+                    self.warning("Unparseable message, closing connection")
+                    await self.sock.close(1008, "JSON decode error")
+                    self.state = ConnectionState.CLOSED
+                    break
+                if "type" not in data:
+                    self.warning("Invalid message, closing connection")
+                    await self.sock.close(1008, "Invalid message structure")
+                    self.state = ConnectionState.CLOSED
+                    break
+                mtype = data['type']
+                self.info(f"Message {mtype}({ml})")
+
+                if auth := data.get("auth"):
+                    if self.state < ConnectionState.START: # untrusted, disconnected, etc
+                        self.warning(f"Untrusted client (state {self.state}) attempted to authenticate")
+                        continue
+                    if self.state >= ConnectionState.AUTHED:
+                        self.warning(f"Already authed, reauthenticating")
+                    self.info(f"Authenticating with {auth}")
+                    result = await self.run(r.db("twitch").table("secrets").get(auth))
+                    if result:
+                        if result.get("kick"):
+                            await self.sock.close(1008, result.get("Kreason", ""))
+                            self.warning(f"Kicking due to policy")
+                            self.state = ConnectionState.CLOSED
+                            break
+                        if result.get("web"):
+                            self.info("New web client just dropped")
+                            self.state = ConnectionState.IGNORE
+                            self.web = True
+                        self.info("Authentication accepted")
+                        self.state = ConnectionState.AUTHED
+                    else:
+                        self.warning("Access denied")
+                        self.state = ConnectionState.IGNORE
+                        continue
+
+                if mtype == "ping":
+                    await self.sock.send('{"type":"godot","method":"ping"}')
+                    continue
+
+                if self.state < ConnectionState.AUTHED:
+                    self.warning("Message without authentication")
+
+                if mtype == "afternoon":
+                    version = data.get("version")
+                    if not version:
+                        self.warning("No version provided")
+                        await self.sock.close(1008, "Container is out of date.")
+                        break
+                    self.info(f"Version: {version}")
+                    self.state = ConnectionState.READY
+                    continue
+
+                if self.state < ConnectionState.READY:
+                    self.warning("Client is too eager")
+                    await self.sock.close(1008, "Container is out of date.")
+
+                # start READY block
+                if self.state == ConnectionState.READY:
+                    if mtype == "get":
+                        if self.ctask:
+                            self.error("State contradiction (READY vs ctask); bailing out")
+                            # There should not be an item running in the READY state
+                            raise RuntimeError("State contradiction (READY vs ctask)")
+                        if DISCONNECT_CLIENTS.is_set():
+                            self.info("Stop flag is set")
+                            response = NOPE | {"suppl": "NO_NEW_SERVES"}
+                            await self.sock.send(json.dumps(response))
+                            continue
+                        try:
+                            item = await request_item()
+                        except Exception as ename:
+                            self.error(f"Error when requesting item: {repr(ename)}")
+                            response = NOPE | {"suppl": "ERROR"}
+                            await self.sock.send(json.dumps(response))
+                            continue
+                        if not item:
+                            self.info("No items found")
+                            item = NOPE
+                        self.ctask = item['id']
+                        self.info(f"Sending {item} to client")
+                        await self.sock.send(json.dumps(item))
+                        self.state = ConnectionState.TASK
+                        continue
+                    else:
+                        self.warning(f"Message type {repr(mtype)} is not recognised in this context (READY)")
+                        response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
                         await self.sock.send(json.dumps(response))
                         continue
-                    try:
-                        item = await request_item()
-                    except Exception as ename:
-                        self.error(f"Error when requesting item: {repr(ename)}")
-                        response = NOPE | {"suppl": "ERROR"}
+                # end READY block
+
+                # begin TASK block
+                elif self.state == ConnectionState.TASK:
+                    if False:
+                        pass
+                    else:
+                        self.warning(f"Message type {repr(mtype)} is not recognised in this context")
+                        response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
                         await self.sock.send(json.dumps(response))
                         continue
-                    if not item:
-                        self.info("No items found")
-                        item = NOPE
-                    self.ctask = item['id']
-                    self.info(f"Sending {item} to client")
-                    await self.sock.send(json.dumps(item))
-                    self.state = ConnectionState.TASK
-                    continue
+                # end TASK block
                 else:
-                    self.warning(f"Message type {repr(mtype)} is not recognised in this context (READY)")
-                    response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
+                    self.warning(f"Unknown state {self.state}")
+                    response = {"type": "response", "response": "error", "reason": "internal_error"}
                     await self.sock.send(json.dumps(response))
                     continue
-            # end READY block
-
-            # begin TASK block
-            elif self.state == ConnectionState.TASK:
-                if False:
-                    pass
-                else:
-                    self.warning(f"Message type {repr(mtype)} is not recognised in this context")
-                    response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
-                    await self.sock.send(json.dumps(response))
-                    continue
-            # end TASK block
-            else:
-                self.warning(f"Unknown state {self.state}")
-                response = {"type": "response", "response": "error", "reason": "internal_error"}
-                await self.sock.send(json.dumps(response))
-                continue
         # end loop
         if task := self.ctask:
             await taskDisconnected(self.id, task)
@@ -245,13 +282,24 @@ class Connection:
         self.info("Connection lost")
 
     async def start(self):
-        await self._start()
+        assert self not in HANDLERS
+        HANDLERS.add(self)
+        try:
+            await self._start()
+        finally:
+            HANDLERS.remove(self)
+            if self.conn:
+                await self.conn.close()
 
 async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol):
     global CURRENT_ID
     cid = CURRENT_ID
     CURRENT_ID += 1
     logger.info(f"Handling connection (cid: {cid})")
+    if DISCONNECT_CLIENTS.is_set():
+        logger.info(f"Kicking {cid} as we are shutting down")
+        await websocket.close(1001, "Not accepting connections")
+        return
     try:
         conn = Connection(cid, websocket)
     except Exception:
@@ -277,21 +325,44 @@ def signal_handler():
     if STOP_SERVER.is_set():
         print("Pressing Ctrl-C again won't do anything. What a waste of time.")
         return
-    if STOP_FLAG.is_set():
+    if DISCONNECT_CLIENTS.is_set():
         print("Stopping immediately.")
         STOP_SERVER.set()
         return
     print("> Press Ctrl-C again to stop immediately")
     print("! Stopping when current tasks are complete...")
-    STOP_FLAG.set()
+    DISCONNECT_CLIENTS.set()
+
+get_non_web_clients = lambda : [i for i in HANDLERS if not i.web]
+get_web_clients = lambda : [i for i in HANDLERS if i.web]
+
+async def check():
+    await DISCONNECT_CLIENTS.wait()
+    for client in get_non_web_clients():
+        async with client.busy:
+            if client.state < ConnectionState.TASK:
+                try:
+                    await client.sock.close(1001, "Shutting down")
+                except Exception:
+                    logger.warning(f"Could not close handler {client.id}")
+                client.disconnected = True
+    while get_non_web_clients():
+        await asyncio.sleep(1)
+    for client in get_web_clients():
+        async with client.busy:
+            await client.sock.close(1001, "Shutting down")
+            client.disconnected = True
+    STOP_SERVER.set()
 
 async def main():
+    task = asyncio.create_task(check())
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     port = int(os.environ['WSPORT'])
     async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16):
         await STOP_SERVER.wait()
-    print("! The server has shut down!")
+    print("! The server has shut down.")
+    task.cancel()
 
 if __name__ == "__main__":
     asyncio.run(main())
