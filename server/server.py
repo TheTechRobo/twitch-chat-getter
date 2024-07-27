@@ -67,6 +67,8 @@ async def request_item():
 CURRENT_ID = 1
 
 def int_or_none(s):
+    if s is None:
+        return None
     try:
         return int(s)
     except ValueError:
@@ -179,6 +181,7 @@ class Connection:
                     break
                 mtype = data['type']
                 self.info(f"Message {mtype}({ml})")
+                seq = data.get("seq")
 
                 if auth := data.get("auth"):
                     if self.state < ConnectionState.START: # untrusted, disconnected, etc
@@ -213,12 +216,14 @@ class Connection:
                     self.warning("Message without authentication")
 
                 if mtype == "afternoon":
-                    version = data.get("version")
+                    version = int_or_none(data.get("version"))
                     if not version:
-                        self.warning("No version provided")
+                        self.warning(f"Bad or missing version: {version}")
                         await self.sock.close(1008, "Container is out of date.")
                         break
                     self.info(f"Version: {version}")
+                    self.version = version
+                    await self.sock.send('{"type":"welcome"}')
                     self.state = ConnectionState.READY
                     continue
 
@@ -245,17 +250,18 @@ class Connection:
                             response = NOPE | {"suppl": "ERROR"}
                             await self.sock.send(json.dumps(response))
                             continue
-                        if not item:
+                        if item:
+                            self.state = ConnectionState.TASK
+                        else:
                             self.info("No items found")
                             item = NOPE
                         self.ctask = item['id']
                         self.info(f"Sending {item} to client")
                         await self.sock.send(json.dumps(item))
-                        self.state = ConnectionState.TASK
                         continue
                     else:
                         self.warning(f"Message type {repr(mtype)} is not recognised in this context (READY)")
-                        response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
+                        response = {"type": "response", "response": "error", "reason": "unrecognised_command", "seq": seq}
                         await self.sock.send(json.dumps(response))
                         continue
                 # end READY block
@@ -265,8 +271,8 @@ class Connection:
                     if False:
                         pass
                     else:
-                        self.warning(f"Message type {repr(mtype)} is not recognised in this context")
-                        response = {"type": "response", "response": "error", "reason": "unrecognised_command"}
+                        self.warning(f"Message type {repr(mtype)} is not recognised in this context (TASK)")
+                        response = {"type": "response", "response": "error", "reason": "unrecognised_command", "seq": seq}
                         await self.sock.send(json.dumps(response))
                         continue
                 # end TASK block
@@ -303,7 +309,7 @@ async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol
     try:
         conn = Connection(cid, websocket)
     except Exception:
-        logger.error(f"Can't make connection handler for client {cid}")
+        logger.error(f"Can't make connection handler for client {cid}: {repr(traceback.format_exc())}")
         await websocket.close(1011, "Internal Server Error")
         raise
     try:

@@ -16,7 +16,9 @@
 
 # FIXME: Update this whenever you make a non-cosmetic change.
 # FIXME: It will be stored in the WARC file and sent to the tracker.
-VERSION = "20231206.01"
+VERSION = 20240726_01
+assert len(str(VERSION)) == 10
+assert str(VERSION).startswith("20") # sorry to everyone living in 2100
 
 import atexit, time, sys
 
@@ -44,6 +46,70 @@ assert DATA_DIR.startswith("/")
 
 def open_and_wait(args, ws):
     process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
+
+class Websocket:
+    """
+    A wrapper for a websocket.
+    """
+    def __init__(self, ws):
+        self.ws = ws
+
+    def send(self, msg):
+        """
+        Sends a message, and returns the server's response.
+        """
+        seq = msg.get("seq") or int(time.time())
+        msg['seq'] = seq
+        self.ws.send(msg)
+        return self._get_response(seq)
+
+    def send_unchecked(self, msg):
+        """
+        Sends a message that the server will not provide a response for.
+        """
+        self.ws.send(msg)
+
+    def _get_next_message(self, wanted_type=None):
+        data = {"type": "godot"}
+        while data['type'] == "godot":
+            opcode, data = self.ws.recv_data()
+            if opcode == 1:
+                data = json.loads(data)
+            elif opcode == 8:
+                print("Server unexpectedly closed the conection.\nResponse: %s" % data)
+                sys.exit(4)
+            else:
+                print(f"Unknown opcode.\nData: {[opcode, data]}")
+                sys.exit(5)
+        if wanted_type:
+            assert data['type'] == wanted_type, f"Bad type for {data}."
+        return data
+
+    def get_next_message(self, wanted_type=None):
+        """
+        Gets a message. If wanted_type is set, an exception will be thrown if
+        the message does not match that type.
+        """
+        data = self._get_next_message(wanted_type)
+        if data['type'] == "response":
+            print(f"Received response: {data}")
+            raise RuntimeError("Unchecked response!")
+
+    def _get_response(self, seq):
+        data = self._get_next_message("response")
+        if seq != data['seq']:
+            print(f"Received mismatched response: {data}")
+            raise RuntimeError("Mismatched response!")
+        if data['type'] == "ok":
+            return data
+        print(f"Received negative response: {data}")
+        raise RuntimeError("Received negative response!")
+
+    def recv(self):
+        """
+        Receives one message.
+        """
+        return self.get_next_message()
 
 class Task:
     def __init__(self, logger, ws):
@@ -342,23 +408,6 @@ def run_warcprox_tail(stop, ws, id):
                 raise
             print(i, file=sys.stdout.old, end="")
 
-def get_next_message(webSocket, wanted_type=None):
-    data = {"type": "godot"}
-    while data['type'] == "godot":
-        opcode, data = webSocket.recv_data()
-        if opcode == 1:
-            data = json.loads(data)
-        elif opcode == 8:
-            print("Server unexpectedly closed the conection.\nResponse: %s" % data)
-            sys.exit(4)
-        else:
-            print("Unknown opcode.\nData:" % [opcode, data])
-            sys.exit(5)
-    if wanted_type:
-        assert data['type'] == wanted_type, f"Bad type for {data}."
-    return data
-
-
 # TODO: Move this into another file
 # Source: https://stackoverflow.com/a/55648984/9654083
 def du(path):
@@ -465,14 +514,13 @@ class UploadData(Task):
             }))
             d = {"type": None}
             while d['type'] != "upload_status":
-                d = get_next_message(ws)
+                d = ws.get_next_message()
                 assert d['type'] in ("upload_status", "upload_log"), f"Received Unrecognised Thing {d}"
                 if d['type'] == "upload_log":
                     print("Recv'd(%d):" % 1 if d.get("exception") else 0, d['payload'], end="", flush=True)
             if d['status'] != current_status:
                 current_status = d['status']
                 print(f"Item entered {current_status.upper()} status.")
-            ws.send(json.dumps({"type": "ping"}))
             time.sleep(2)
 
         print("Upload confirmed on IA!")
@@ -538,7 +586,7 @@ class Pipeline:
             self.tasks.append(task(print, ws))
 
     def _start(self, item, ws, author, ident, full, queuedFor):
-        ws.send(json.dumps({"type": "ping"}))
+        ws.ping()
         fullItem = item
         ctx = {}
         try:
@@ -551,7 +599,6 @@ class Pipeline:
                 ws.send(json.dumps({"type": "status", "task": cls.__name__, "id": ident}))
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
                 task.run(item, itemType, author, ident, full, queuedFor, ctx)
-                ws.send(json.dumps({"type": "ping"}))
                 print(f"Finished {cls.__name__} for item {itemType}:{item}")
         except Exception:
             print("Caught exception!")
@@ -669,7 +716,7 @@ def mainloop():
     ws.connect(os.environ["CONNECT"])
     ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
     ws.send(json.dumps({"type": "ping"}))
-    assert json.loads(ws.recv())["type"] == "godot", "Incorrect server!"
+    get_next_message(ws, "welcome")
     pipeline = Pipeline(
         ws,
         PrepareDirectories,
