@@ -16,11 +16,10 @@ async def failItem(task, reason):
     # Allows up to 3 retries before moving item to the `error` table and sending details to IRC
     raise NotImplementedError()
 
-async def taskDisconnected(cid, task):
+async def taskDisconnected(cid, id):
     # Fail the item
-    id = task['id']
     logger.info(f"Client {cid} disconnected while working on item {id}")
-    await failItem(task, "Client disconnected")
+    await failItem(id, "Client disconnected")
 
 # List of all handlers, including web clients
 HANDLERS: set["Connection"] = set()
@@ -282,8 +281,10 @@ class Connection:
 
                 # begin TASK block
                 elif self.state == ConnectionState.TASK:
-                    if False:
+                    if mtype == "WLOG":
                         pass
+                    elif mtype == "status":
+                        await send_response("ok")
                     else:
                         self.warning(f"Message type {repr(mtype)} is not recognised in this context (TASK)")
                         response = {"type": "response", "response": "error", "reason": "unrecognised_command", "seq": seq}

@@ -16,7 +16,7 @@
 
 # FIXME: Update this whenever you make a non-cosmetic change.
 # FIXME: It will be stored in the WARC file and sent to the tracker.
-VERSION = "20240727.01"
+VERSION = "20240728.01"
 
 import atexit, time, sys
 
@@ -62,16 +62,19 @@ class Websocket:
     def __init__(self, ws):
         self.ws = ws
         self.seq = 0
+        self.seq_lock = threading.Lock()
 
     def send(self, msg):
         """
         Sends a message, and returns the server's response.
         """
-        self.seq += 1
+        with self.seq_lock:
+            self.seq += 1
+            seq = self.seq
         msg = json.loads(msg)
-        msg['seq'] = self.seq
+        msg['seq'] = seq
         self.ws.send(json.dumps(msg))
-        return self._get_response(self.seq)
+        return self._get_response(seq)
 
     def send_unchecked(self, msg):
         """
@@ -109,7 +112,7 @@ class Websocket:
         if seq != data['seq']:
             print(f"Received mismatched response: {data}")
             raise RuntimeError("Mismatched response!")
-        if data['response'] == "err":
+        if data['response'] in {"error", "err"}:
             print(f"Received error response: {data}")
             raise RuntimeError("Received negative response!")
         return data
@@ -122,6 +125,9 @@ class Websocket:
 
     def ping(self):
         return self.ws.ping()
+
+    def close(self, *args, **kwargs):
+        return self.ws.close(*args, **kwargs)
 
 class Task:
     def __init__(self, logger, ws):
@@ -177,7 +183,7 @@ class DownloadData(Task):
         with open(__file__, "rb") as file:
             file_hash = hashlib.sha256(file.read()).hexdigest()
         assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s v:%s" % (file_hash, VERSION)).status_code == 204
-        self.ws.send(json.dumps({"type": "ping"}))
+        self.ws.ping()
 
     def _kill_warcprox(self, pid, sig="INT"):
         print("Terminating warcprox")
@@ -188,7 +194,7 @@ class DownloadData(Task):
             shutil.which("kill"), f"-{sig}", str(pid)]
         ).check_returncode()
         try:
-            self.ws.send('{"type": "ping"}')
+            self.ws.ping()
         except Exception:
             pass
 
@@ -236,7 +242,7 @@ class DownloadData(Task):
             ], ws)
         finally:
             del os.environ['CURL_CA_BUNDLE']
-        ws.send('{"type": "ping"}')
+        ws.ping()
 
     def _run_channel(self, item):
         proxy = "http://localhost:" + self.WARCPROX_PORT
@@ -416,7 +422,7 @@ def run_warcprox_tail(stop, ws, id):
                 time.sleep(0.4)
                 continue
             try:
-                ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
+                ws.send_unchecked(json.dumps({"type": "WLOG", "data": i, "item": id}))
             except Exception as ename:
                 print("Could not submit Warcprox Log, raising.", file=sys.stdout.old, flush=True)
                 raise
@@ -559,7 +565,7 @@ class Logger:
                 logging.info(f"{self.prefix} {message.rstrip()}")
             if self.ws:
                 try:
-                    self.ws.send(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
+                    self.ws.send_unchecked(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
                 except Exception:
                     print("Failed to post message to server.", file=self.old)
         print(message, file=self.old, end="")
@@ -636,7 +642,7 @@ class Pipeline:
                 resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}", timeout=120)
             url = resp.text.replace(".am/", ".am/inline/")
 
-            ws.send(json.dumps({
+            ws.send_unchecked(json.dumps({
                 "type": "error",
                 "item": fullItem,
                 "reason": f"Caught exception: {url}",
@@ -654,8 +660,8 @@ class Pipeline:
         """
         Wrapper to _start that defers SIGINT.
         """
-        with prevent_sigint.signal_fence(signal.SIGINT, on_deferred_signal=self._stuff):
-            return self._start(*args, **kwargs)
+        #with prevent_sigint.signal_fence(signal.SIGINT, on_deferred_signal=self._stuff):
+        return self._start(*args, **kwargs)
 
     @staticmethod
     def _stuff(*_args, **_kwargs):
