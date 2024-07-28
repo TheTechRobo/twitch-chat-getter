@@ -31,12 +31,13 @@ print("It is now", time.time(), "o'clock.", flush=True)
 
 @atexit.register
 def wait_on_exit():
-    print("Waiting 20 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
-    time.sleep(20)
+    print("Waiting 15 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
+    time.sleep(15)
 
 import websocket, json, os, subprocess, shutil, os, os.path, base64
 import hashlib, traceback, signal, collections, struct, hashlib, logging, fcntl
 import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
+import random
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
@@ -45,21 +46,32 @@ assert DATA_DIR.startswith("/")
 def open_and_wait(args, ws):
     process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
 
+class ConnectionClosedCleanly(SystemExit):
+    """
+    Raised by _get_next_message when a close frame is sent.
+    """
+    def __init__(self, code, reason):
+        super().__init__(4)
+        self.code = code
+        self.reason = reason
+
 class Websocket:
     """
     A wrapper for a websocket.
     """
     def __init__(self, ws):
         self.ws = ws
+        self.seq = 0
 
     def send(self, msg):
         """
         Sends a message, and returns the server's response.
         """
-        seq = msg.get("seq") or int(time.time())
-        msg['seq'] = seq
-        self.ws.send(msg)
-        return self._get_response(seq)
+        self.seq += 1
+        msg = json.loads(msg)
+        msg['seq'] = self.seq
+        self.ws.send(json.dumps(msg))
+        return self._get_response(self.seq)
 
     def send_unchecked(self, msg):
         """
@@ -67,15 +79,14 @@ class Websocket:
         """
         self.ws.send(msg)
 
-    def _get_next_message(self, wanted_type=None):
+    def _get_next_message(self, wanted_type=None, ok_close_connection=False):
         data = {"type": "godot"}
         while data['type'] == "godot":
             opcode, data = self.ws.recv_data()
             if opcode == 1:
                 data = json.loads(data)
             elif opcode == 8:
-                print("Server unexpectedly closed the conection.\nResponse: %s" % data)
-                sys.exit(4)
+                raise ConnectionClosedCleanly(struct.unpack("!H", data[:2])[0], f"{code} {data[2:].decode()}")
             else:
                 print(f"Unknown opcode.\nData: {[opcode, data]}")
                 sys.exit(5)
@@ -83,12 +94,12 @@ class Websocket:
             assert data['type'] == wanted_type, f"Bad type for {data}."
         return data
 
-    def get_next_message(self, wanted_type=None):
+    def get_next_message(self, wanted_type=None, ok_close_connection=False):
         """
         Gets a message. If wanted_type is set, an exception will be thrown if
         the message does not match that type.
         """
-        data = self._get_next_message(wanted_type)
+        data = self._get_next_message(wanted_type, ok_close_connection)
         if data['type'] == "response":
             print(f"Received response: {data}")
             raise RuntimeError("Unchecked response!")
@@ -98,16 +109,19 @@ class Websocket:
         if seq != data['seq']:
             print(f"Received mismatched response: {data}")
             raise RuntimeError("Mismatched response!")
-        if data['type'] == "ok":
-            return data
-        print(f"Received negative response: {data}")
-        raise RuntimeError("Received negative response!")
+        if data['response'] == "err":
+            print(f"Received error response: {data}")
+            raise RuntimeError("Received negative response!")
+        return data
 
     def recv(self):
         """
         Receives one message.
         """
         return self.get_next_message()
+
+    def ping(self):
+        return self.ws.ping()
 
 class Task:
     def __init__(self, logger, ws):
@@ -647,62 +661,35 @@ class Pipeline:
     def _stuff(*_args, **_kwargs):
         print("Stopping when current tasks are finished...")
 
-doNotRequestItem = False
-
-def updateWS(ws):
-    global doNotRequestItem # pylint: disable=global-statement
-    if not doNotRequestItem:
-        print("Requesting item")
-        ws.send(json.dumps({"type": "get"}))
-    opcode, data = ws.recv_data()
-    print(data)
-    if opcode == 1:
-        # Continue
-        pass
-    elif opcode == 8:
-        # unpack status code as network-endian (big endian) unsigned short
-        code = struct.unpack("!H", data[:2])[0]
-        print("Server responded with CLOSE frame.\n"
-                "Reason: %d %s" % (code, data[2:].decode()))
-        print("Connection closed by remote host.")
-        sys.exit(10)
-    else:
-        raise ValueError(f"Unsupported opcode sent from server: {opcode}")
-    item = data
-    _ = json.loads(item)
-    if type(_) == dict:
-        if _['type'] != "godot" and _['type'] != "item":
-            raise ValueError(f"Unexpected type {_}")
-        if _['type'] != "item":
-            doNotRequestItem = True # we already did - this is not the item
-            return
-        if _['type'] == "item":
-            item = _['item']
-            if not item:
-                message = "No items received."
-                if suppl := _.get("suppl"):
-                    if suppl == "NO_NEW_SERVES":
-                        message = "Items are not currently being served."
-                    elif suppl == "RATE_LIMITING":
-                        message = "Tracker ratelimiting is active. In order not to overload Twitch, we've limited the speed of item serves."
-                    elif suppl == "ERROR":
-                        message = "Tracker experienced an internal error."
-                    else:
-                        message = f"Server returned status {suppl}."
-                print(f"{message} Trying again in 15 seconds.")
-                time.sleep(15)
-                doNotRequestItem = False
-                return
-            author = _['started_by']
-            id = _['id']
-            queuedFor = _.get("queued_for_item")
-            doNotRequestItem = False
-    else:
-        print()
-        print("Item:", item)
-        raise ValueError("Bad server version?")
+def updateWS(ws: Websocket):
+    print("Requesting item")
+    try:
+        response = ws.send(json.dumps({"type": "get"}))
+    except ConnectionClosedCleanly as info:
+        print(f"Server closed connection.\nReason: {info.reason}")
+        raise
+    print(response)
+    assert response['response'] == "item"
+    item = response['item']
+    if not item:
+        message = "No items received."
+        if suppl := response.get("suppl"):
+            if suppl == "NO_NEW_SERVES":
+                message = "Items are not currently being served."
+            elif suppl == "RATE_LIMITING":
+                message = "Tracker ratelimiting is active. In order not to overload Twitch, we've limited the speed of item serves."
+            elif suppl == "ERROR":
+                message = "Tracker experienced an internal error."
+            else:
+                message = f"Server returned status {suppl}."
+        print(f"{message} Trying again in 15 seconds.")
+        time.sleep(15)
+        return
+    author = response['started_by']
+    id = response['id']
+    queuedFor = response.get("queued_for_item")
     print(f"Got item {item} for author {author}")
-    pipeline.start(item, ws, author, id, data.decode("utf-8"), queuedFor)
+    pipeline.start(item, ws, author, id, response, queuedFor)
 
 pipeline = None
 
@@ -713,9 +700,10 @@ def mainloop():
     rws = websocket.WebSocket()
     rws.connect(os.environ["CONNECT"])
     ws = Websocket(rws)
-    ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
-    ws.send(json.dumps({"type": "ping"}))
-    ws.get_next_message("welcome")
+    welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
+    if welcome['response'] != "welcome":
+        raise RuntimeError("Server did not grant us a warm welcome")
+    ws.ping()
     pipeline = Pipeline(
         ws,
         PrepareDirectories,

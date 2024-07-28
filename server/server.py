@@ -191,6 +191,12 @@ class Connection:
                 self.info(f"Message {mtype}({ml})")
                 seq = data.get("seq")
 
+                async def send_response(response, data={}):
+                    """
+                    Sends a response to the client
+                    """
+                    await self.sock.send(json.dumps(data | {"type": "response", "response": response, "seq": seq}))
+
                 if auth := data.get("auth"):
                     if self.state < ConnectionState.START: # untrusted, disconnected, etc
                         self.warning(f"Untrusted client (state {self.state}) attempted to authenticate")
@@ -231,7 +237,7 @@ class Connection:
                         break
                     self.info(f"Version: {version}")
                     self.version = version
-                    await self.sock.send('{"type":"welcome"}')
+                    await send_response("welcome")
                     self.state = ConnectionState.READY
                     continue
 
@@ -265,7 +271,7 @@ class Connection:
                             item = NOPE
                         self.ctask = item['id']
                         self.info(f"Sending {item} to client")
-                        await self.sock.send(json.dumps(item))
+                        await send_response("item", item)
                         continue
                     else:
                         self.warning(f"Message type {repr(mtype)} is not recognised in this context (READY)")
