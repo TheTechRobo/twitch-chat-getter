@@ -16,9 +16,7 @@
 
 # FIXME: Update this whenever you make a non-cosmetic change.
 # FIXME: It will be stored in the WARC file and sent to the tracker.
-VERSION = 20240726_01
-assert len(str(VERSION)) == 10
-assert str(VERSION).startswith("20") # sorry to everyone living in 2100
+VERSION = "20240727.01"
 
 import atexit, time, sys
 
@@ -160,7 +158,7 @@ class DownloadData(Task):
         self.WARCPROX_PORT = "4553"
         self._run_warcprox()
         self._run_warcprox_tail()
-        time.sleep(4)
+        time.sleep(6)
         file_hash = ""
         with open(__file__, "rb") as file:
             file_hash = hashlib.sha256(file.read()).hexdigest()
@@ -213,15 +211,17 @@ class DownloadData(Task):
             file.write("[]") # workaround for chat_downloader only writing the file when there are messages
         print("Downloading chat")
         os.environ['CURL_CA_BUNDLE'] = "./file.pem"
-        open_and_wait([
-            shutil.which("chat_downloader"),
-            "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
-            "--logging", "warning",
-            "--interruptible_retry", "False",
-            "--proxy", "http://localhost:" + self.WARCPROX_PORT,
-            "https://twitch.tv/videos/" + item
-        ], ws)
-        del os.environ['CURL_CA_BUNDLE']
+        try:
+            open_and_wait([
+                shutil.which("chat_downloader"),
+                "--message_groups", 'messages bans deleted_messages hosts room_states user_states notices chants other bits subscriptions upgrades raids rituals mods colours commercials vips charity', "-o", "chat.json",
+                "--logging", "warning",
+                "--interruptible_retry", "False",
+                "--proxy", "http://localhost:" + self.WARCPROX_PORT,
+                "https://twitch.tv/videos/" + item
+            ], ws)
+        finally:
+            del os.environ['CURL_CA_BUNDLE']
         ws.send('{"type": "ping"}')
 
     def _run_channel(self, item):
@@ -447,7 +447,7 @@ class UploadData(Task):
         sha = hashlib.sha256()
 
         ws.send(json.dumps({"type": "negotiate", "method": "chunk_size"}))
-        chunk_response = get_next_message(ws, "negotiate")
+        chunk_response = ws.get_next_message("negotiate")
         # Maximum 2 MiB
         chunk_size = max(chunk_response['result'], 2*1024*1024)
         # Start takeoff
@@ -455,7 +455,7 @@ class UploadData(Task):
         while preflight_response['type'] != "mes":
             ws.send(json.dumps({"type": "upload", "method": "preflight",
                 "approxSize": du(path)[1]}))
-            preflight_response = get_next_message(ws)
+            preflight_response = ws.get_next_message()
             assert preflight_response['type'] in ("mes", "nak")
             if preflight_response['type'] == "mes":
                 break
@@ -617,10 +617,8 @@ class Pipeline:
             except FileNotFoundError:
                 logfile += "Warcprox logfile not found. The file may have already been moved."
 
-            class Dummy:
-                status_code = 0
-            resp = Dummy()
-            while resp.status_code != 200:
+            resp = None
+            while not resp or resp.status_code != 200:
                 resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}", timeout=120)
             url = resp.text.replace(".am/", ".am/inline/")
 
@@ -712,11 +710,12 @@ def mainloop():
     global pipeline # pylint: disable=global-statement
 
     # init
-    ws = websocket.WebSocket()
-    ws.connect(os.environ["CONNECT"])
+    rws = websocket.WebSocket()
+    rws.connect(os.environ["CONNECT"])
+    ws = Websocket(rws)
     ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
     ws.send(json.dumps({"type": "ping"}))
-    get_next_message(ws, "welcome")
+    ws.get_next_message("welcome")
     pipeline = Pipeline(
         ws,
         PrepareDirectories,

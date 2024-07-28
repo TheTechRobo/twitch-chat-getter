@@ -85,6 +85,14 @@ class ConnectionState:
 
 NOPE = {"type": "item", "item": "", "started_by": None, "id": None}
 
+def parse_version(version):
+    try:
+        date, seq = version.split(".")
+    except ValueError:
+        return None
+    # todo: min version check
+    return version
+
 class Connection:
     @property
     def id(self):
@@ -216,9 +224,9 @@ class Connection:
                     self.warning("Message without authentication")
 
                 if mtype == "afternoon":
-                    version = int_or_none(data.get("version"))
+                    version = parse_version(data.get("version"))
                     if not version:
-                        self.warning(f"Bad or missing version: {version}")
+                        self.warning(f"Bad or missing version: {data.get('version')}")
                         await self.sock.close(1008, "Container is out of date.")
                         break
                     self.info(f"Version: {version}")
