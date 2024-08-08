@@ -1,6 +1,8 @@
 import asyncio, logging, json, traceback, os
 import typing, random, signal
 
+from .messages import *
+
 from websockets.frames import CloseCode
 
 logger = logging.getLogger(__name__)
@@ -72,15 +74,6 @@ def int_or_none(s):
         return int(s)
     except ValueError:
         return None
-
-class ConnectionState:
-    CLOSED = -100
-    IGNORE = -1
-    START = 0
-    AUTHED = 1
-    READY = 2
-    TASK = 5
-    UPLOAD = 10
 
 NOPE = {"type": "item", "item": "", "started_by": None, "id": None}
 
@@ -311,6 +304,7 @@ class Connection:
             HANDLERS.remove(self)
             if self.conn:
                 await self.conn.close()
+                print("closed")
 
 async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol):
     global CURRENT_ID
