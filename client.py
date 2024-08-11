@@ -46,12 +46,11 @@ assert DATA_DIR.startswith("/")
 def open_and_wait(args, ws):
     process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
 
-class ConnectionClosedCleanly(SystemExit):
+class ConnectionClosedCleanly(Exception):
     """
     Raised by _get_next_message when a close frame is sent.
     """
     def __init__(self, code, reason):
-        super().__init__(4)
         self.code = code
         self.reason = reason
 
@@ -89,7 +88,7 @@ class Websocket:
             if opcode == 1:
                 data = json.loads(data)
             elif opcode == 8:
-                raise ConnectionClosedCleanly(struct.unpack("!H", data[:2])[0], f"{code} {data[2:].decode()}")
+                raise ConnectionClosedCleanly(struct.unpack("!H", data[:2])[0], f"{data[2:].decode()}")
             else:
                 print(f"Unknown opcode.\nData: {[opcode, data]}")
                 sys.exit(5)
@@ -672,8 +671,8 @@ def updateWS(ws: Websocket):
     try:
         response = ws.send(json.dumps({"type": "get"}))
     except ConnectionClosedCleanly as info:
-        print(f"Server closed connection.\nReason: {info.reason}")
-        raise
+        print(f"Server closed connection.\nReason: {info.code} {info.reason}")
+        sys.exit(4)
     print(response)
     assert response['response'] == "item"
     item = response['item']
@@ -706,7 +705,11 @@ def mainloop():
     rws = websocket.WebSocket()
     rws.connect(os.environ["CONNECT"])
     ws = Websocket(rws)
-    welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
+    try:
+        welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
+    except ConnectionClosedCleanly as info:
+        print(f"Connection didn't open ({info.code} {info.reason})")
+        sys.exit(4)
     if welcome['response'] != "welcome":
         raise RuntimeError("Server did not grant us a warm welcome")
     ws.ping()
