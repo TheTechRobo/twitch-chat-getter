@@ -1,0 +1,14 @@
+from common.irc import IrcBot, try_upload_file
+
+import os
+
+__all__ = ['send_message']
+
+irc = IrcBot(None, os.environ['H2IBOT_POST_URL'])
+
+async def send_message(message: str):
+    await irc.send_message(message)
+
+async def reply(author: str, message: str):
+    await irc.reply(author, message)
+

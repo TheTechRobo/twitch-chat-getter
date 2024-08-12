@@ -4,6 +4,8 @@ __pycache__/
 run.sh
 runClient.sh
 runClientDebug.sh
+runServer.sh
+runIrcBot.sh
 rethinkdb.log
 we_haul.py
 test/

@@ -62,6 +62,7 @@ class Websocket:
         self.ws = ws
         self.seq = 0
         self.seq_lock = threading.Lock()
+        atexit.register(self.close_then_shutdown)
 
     def send(self, msg):
         """
@@ -88,7 +89,9 @@ class Websocket:
             if opcode == 1:
                 data = json.loads(data)
             elif opcode == 8:
-                raise ConnectionClosedCleanly(struct.unpack("!H", data[:2])[0], f"{data[2:].decode()}")
+                code = struct.unpack("!H", data[:2])[0]
+                self.close(code)
+                raise ConnectionClosedCleanly(code, f"{data[2:].decode()}")
             else:
                 print(f"Unknown opcode.\nData: {[opcode, data]}")
                 sys.exit(5)
@@ -125,8 +128,12 @@ class Websocket:
     def ping(self):
         return self.ws.ping()
 
-    def close(self, *args, **kwargs):
-        return self.ws.close(*args, **kwargs)
+    def close(self, status=1000, reason=b""):
+        return self.ws.close(status, reason)
+
+    def close_then_shutdown(self, status=1000, reason=b""):
+        self.close(status, reason)
+        self.ws.shutdown()
 
 class Task:
     def __init__(self, logger, ws):

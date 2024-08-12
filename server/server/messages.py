@@ -2,7 +2,7 @@
 
 __all__ = ("HANDLER_FUNCTIONS", "handler")
 
-import functools, enum, typing
+import functools, typing
 
 from .shared import *
 

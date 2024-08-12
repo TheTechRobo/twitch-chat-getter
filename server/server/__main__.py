@@ -44,7 +44,7 @@ STOP_SERVER = asyncio.Event()
 # I would use Task.cancel, but then we can't have the "press ctrl-c twice to exit" feature
 def signal_handler():
     if STOP_SERVER.is_set():
-        print("Pressing Ctrl-C again won't do anything. What a waste of time.")
+        print("The server is already stopping as fast as possible.")
         return
     if DISCONNECT_CLIENTS.is_set():
         print("Stopping immediately.")
@@ -59,16 +59,18 @@ get_web_clients = lambda : [i for i in CONNECTIONS if i.web]
 
 async def check():
     await DISCONNECT_CLIENTS.wait()
-    for client in get_non_web_clients():
-        async with client.busy:
-            if client.state < ConnectionState.TASK:
-                try:
-                    await client.sock.close(1001, "Shutting down")
-                except Exception:
-                    logger.warning(f"Could not close handler {client.id}")
-                client.disconnected = True
-    while get_non_web_clients():
-        await asyncio.sleep(1)
+    while clients := get_non_web_clients():
+        print("Shuting down", len(clients), "clients")
+        for client in clients:
+            async with client.busy:
+                if client.state < ConnectionState.TASK:
+                    try:
+                        await client.sock.close(1001, "Shutting down")
+                    except Exception:
+                        logger.warning(f"Could not close handler {client.id}")
+                    client.disconnected = True
+        if get_non_web_clients():
+            await asyncio.sleep(5)
     for client in get_web_clients():
         async with client.busy:
             await client.sock.close(1001, "Shutting down")
@@ -80,8 +82,9 @@ async def main():
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     port = int(os.environ['WSPORT'])
-    async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16):
+    async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16) as server:
         await STOP_SERVER.wait()
+        server.close(False) # check() would have already handled this
     print("! The server has shut down.")
     task.cancel()
 

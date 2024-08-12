@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 from .messages import *
 from .shared import *
+from .db import *
 from . import handlers
 
 __all__ = ["Connection"]
@@ -42,7 +43,6 @@ class Connection:
         self.disconnected = False
         self.state = ConnectionState.START
         self.web = False
-        self.conn = None
         self.sock = sock
         # self._id is not mutable; *do not* change it.
         # You will break everything if you change it outside of __init__.
@@ -158,7 +158,7 @@ class Connection:
                         continue
 
                 if mtype == "ping":
-                    await self.sock.send('{"type":"godot","method":"ping"}')
+                    await self.sock.pong()
                     continue
 
                 if self.state < ConnectionState.AUTHED:
@@ -191,9 +191,6 @@ class Connection:
                     continue
 
         # end loop
-        if task := self.ctask:
-            await taskDisconnected(self.id, task)
-        self.ctask = None
         self.info("Connection lost")
 
     async def start(self):
@@ -201,9 +198,11 @@ class Connection:
         CONNECTIONS.add(self)
         try:
             await self._start()
+        except websockets.exceptions.ConnectionClosedError:
+            self.info("Connection closed uncleanly")
         finally:
             CONNECTIONS.remove(self)
-            if self.conn:
-                await self.conn.close()
-                print("closed")
+            if task := self.ctask:
+                await taskDisconnected(self.id, task)
+            self.ctask = None
 
