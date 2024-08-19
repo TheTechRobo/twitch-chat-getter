@@ -1,13 +1,12 @@
 # Message handlers
 # Thank you to thuban and arkiver for helping me decide on the implementation here!
 
-__all__ = []
+__all__ = ["HANDLER_FUNCTIONS"]
 
-import json, typing
+import json, typing, functools
 
 from server.common.irc import try_upload_file
 
-from .messages import handler
 from .shared import *
 from .db import *
 from . import irc
@@ -17,6 +16,26 @@ if typing.TYPE_CHECKING:
     from .connection import Connection
 
 NOPE = {"type": "item", "item": "", "started_by": None, "id": None}
+
+HANDLER_FUNCTIONS = {}
+
+def _generate_handler_functions_skeleton():
+    for state in ConnectionState.__members__.values():
+        HANDLER_FUNCTIONS[state] = {}
+_generate_handler_functions_skeleton()
+
+def handler(func=None, *, states: typing.Union[None, ConnectionState, typing.Iterable[ConnectionState]], name: str):
+    if func:
+        if states is None:
+            states = list(ConnectionState.__members__.values())
+        if isinstance(states, ConnectionState):
+            states = (states,) # convert it to a tuple so it is iterable
+        for state in states:
+            if name in HANDLER_FUNCTIONS[state]:
+                raise ValueError(f"Duplicate command name {name} for the same state {state}")
+            HANDLER_FUNCTIONS[state][name] = func
+        return func
+    return functools.partial(handler, states=states, name=name)
 
 # Connection state: READY
 
@@ -68,6 +87,7 @@ async def submit_to_backfeed(self: "Connection", msg: dict):
         self.warning(f"Bad backfeed! {repr(item)} : {repr(reason)}")
         await self.send_response("invalid_item_name")
         return
+    await register_backfeed(item, item_for)
     await irc.send_message(f"!a {item} {reason}")
     ids, errors = await queue_item(item, reason, user, item_for)
     if errors:
@@ -78,4 +98,5 @@ async def submit_to_backfeed(self: "Connection", msg: dict):
             await irc.reply(user, f"No items could be queued ({len(errors)} errors); check {error_url} for more details.")
     if ids:
         await irc.reply(user, f"Queued {len(ids)} discovered items from item {item_for}.")
+    await self.send_response("ok")
 

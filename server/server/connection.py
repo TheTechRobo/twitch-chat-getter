@@ -6,10 +6,9 @@ from websockets.frames import CloseCode
 
 logger = logging.getLogger(__name__)
 
-from .messages import *
 from .shared import *
 from .db import *
-from . import handlers
+from .handlers import HANDLER_FUNCTIONS
 
 __all__ = ["Connection"]
 

@@ -3,7 +3,9 @@ import aiohttp
 from rethinkdb import r
 r.set_loop_type("asyncio")
 
-__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item"]
+from .log import logger
+
+__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "register_backfeed"]
 
 # Queues earlier in this list will be drained before queues later in the list.
 # When an item fails and is retried, it is placed in the next queue.
@@ -23,12 +25,12 @@ async def _get_item(conn, queue: str):
         .update({"status": "claims"}, return_changes=True).run(conn)
     if result['replaced'] == 0:
         return None
+    assert not result['errors'], repr(result)
     changes: list[dict] = result['changes']
-    if not changes:
-        return None
+    assert changes
     if len(changes) == 1:
         return changes[0]['old_val']
-    raise RuntimeError("RethinkDB checked out too many items.")
+    raise RuntimeError(f"RethinkDB checked out too many items. ctx=<<{repr(changes)}>>")
 
 async def request_item():
     conn = await r.connect()
@@ -73,6 +75,9 @@ async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[
             "queued_for_item": parent_item
         }
         res = await r.db("twitch").table("todo").insert(entry).run(conn)
+        if res['errors']:
+            logger.error(f"Database write failed! {repr(res)}")
+            raise RuntimeError(f"Database write failed!")
         return res['generated_keys'][0]
     finally:
         try:
@@ -80,11 +85,28 @@ async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[
         except Exception:
             pass
 
+async def wrap_db_result(result):
+    assert not (await result)['errors']
+
+async def register_backfeed(item: str, parent_item: str):
+    conn = r.connect()
+    try:
+        await wrap_db_result(r.db("twitch").table("ctx").insert(
+            {"type": "backfeed", "item": item, "parent_item": parent_item}
+        ).run(conn))
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+VOD_ID_REGEX = re.compile(r"^https?://w?w?w?.?twitch.tv/videos/(\d+)")
+CHANNEL_ID_REGEX = re.compile(r"^https?://w?w?w?\.?twitch\.tv/([\w]+)")
+
 async def queue_item(item: str, reason: str, user: str, parent_item: typing.Optional[str] = None):
     global AIOHTTP_SESSION
     if not AIOHTTP_SESSION:
         AIOHTTP_SESSION = aiohttp.ClientSession(timeout=10)
-    conn = await r.connect()
     if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", item):
         ids, errors = [], []
         async with AIOHTTP_SESSION.get(item) as response:
@@ -98,12 +120,12 @@ async def queue_item(item: str, reason: str, user: str, parent_item: typing.Opti
         if not ids and not errors:
             raise EmptyFileError("File did not contain any items.")
         return ids, errors
-    id = re.search(r"^https?://w?w?w?.?twitch.tv/videos/(\d+)", item)
+    id = VOD_ID_REGEX.search(item)
     if id:
         expires = None
         is_channel = False
     else:
-        id = re.search(r"^https?://w?w?w?\.?twitch\.tv/([\w]+)", item)
+        id = CHANNEL_ID_REGEX.search(item)
         is_channel = True
         expires = int(time.time()) + 48 * 3600 # expires in 48 hours
         if not id:
@@ -112,3 +134,47 @@ async def queue_item(item: str, reason: str, user: str, parent_item: typing.Opti
     if is_channel:
         id = f"c{id}"
     return [await add_to_db(item, reason, user, expires, parent_item)], []
+
+async def get_item(ident: str):
+    conn = await r.connect()
+    try:
+        if res := await r.db("twitch").table("todo").get(ident).run(conn):
+            return res
+        if res := await r.db("twitch").table("error").get(ident).run(conn):
+            res['status'] = "error"
+            return res
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+async def get_item_children(ident: str, filter=(lambda _ : True)) -> tuple[list[dict], list[dict]]:
+    conn = await r.connect()
+    try:
+        items, errors = [], []
+        async for item in r.db("twitch").table("todo").get_all(ident, index="queued_for_item").run(conn):
+            if filter(item):
+                items.append(item)
+        async for item in r.db("twitch").table("error").get_all(ident, index="queued_for_item").run(conn):
+            item['status'] = "error"
+            if filter(item):
+                errors.append(item)
+        return items, errors
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+async def get_queue_status():
+    conn = await r.connect()
+    try:
+        todo_count = await r.db("twitch").table("todo").get_all("todo", index="status").count().run(conn)
+        claims_count = await r.db("twitch").table("todo").get_all("claims", index="status").count().run(conn)
+        return {"todo": todo_count, "claims": claims_count}
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass

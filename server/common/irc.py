@@ -10,25 +10,39 @@ class IrcBot:
     def __init__(self, stream_url: str, post_url: str):
         self.stream_url = stream_url
         self.post_url = post_url
-        self.session = aiohttp.ClientSession()
+        self.session = None
 
     async def send_message(self, message: str):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
         async with self.session.post(self.post_url, data=message) as response:
             if response.status != 200:
                 raise MessageSendError(response.status)
 
     async def reply(self, author: str, message: str):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
         if author:
             await self.send_message(f"{author}: {message}")
         else:
             await self.send_message(message)
 
     async def __aiter__(self):
-        async with self.session.get(self.stream_url) as response:
-            if response.status != 200:
-                raise StatusCodeError(response.status)
-            async for line in response.content:
-                yield line.decode()
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+        tries = 1
+        while True:
+            try:
+                async with self.session.get(self.stream_url) as response:
+                    if response.status != 200:
+                        raise StatusCodeError(response.status)
+                    async for line in response.content:
+                        yield line.decode()
+            except Exception:
+                logging.exception("Exception when streaming:")
+            delay = min(4*tries, 60)
+            logging.info(f"Try {tries}. Waiting {delay}s before reconnecting")
+            await asyncio.sleep(delay)
 
 AIOHTTP_SESSION = None
 

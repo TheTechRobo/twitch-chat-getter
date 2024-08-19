@@ -1,4 +1,10 @@
-import functools, enum, logging, asyncio
+import functools, enum, asyncio
+
+__all__ = [
+    "logger", "ConnectionState", "int_or_none", "CONNECTIONS", "DISCONNECT_CLIENTS", "PAUSE_FLAG"
+]
+
+from common.log import logger
 
 @functools.total_ordering # we only have to implement __lt__ to allow comparison operators
 @enum.unique
@@ -31,5 +37,3 @@ DISCONNECT_CLIENTS: asyncio.Event = asyncio.Event()
 # Pause flag: Stops item serves if set. Set manually by the IRC bot
 PAUSE_FLAG = asyncio.Event()
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG, format="# [%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)", encoding="utf-8", errors="backslashreplace")
