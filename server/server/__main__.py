@@ -4,6 +4,7 @@ import typing, random, signal
 from .shared import *
 from .connection import *
 from .db import *
+from .irc import irc
 
 logger.info("> Begin new log session")
 
@@ -77,6 +78,10 @@ async def check():
     STOP_SERVER.set()
 
 async def main():
+    # Clear out claims
+    async for job in get_all_claimed_jobs():
+        await irc.fail_item(job, "Tracker died while item was claimed")
+
     task = asyncio.create_task(check())
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler)

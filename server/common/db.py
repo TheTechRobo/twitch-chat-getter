@@ -4,21 +4,53 @@ from rethinkdb import r
 r.set_loop_type("asyncio")
 
 from .log import logger
+import enum
 
-__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "register_backfeed"]
+__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "register_backfeed", "Decision"]
 
 # Queues earlier in this list will be drained before queues later in the list.
 # When an item fails and is retried, it is placed in the next queue.
 # (If there is no queue to move it to, the item is not moved.)
-QUEUES = ["priority", "todo", "backfeed", "aux", "aux2"]
+QUEUES = ["todo"]
 
-async def fail_item(task: str, reason: str):
+class Decision(enum.Enum):
+    RETRIED       = 0 # The task was requeued
+    FAILED        = 1 # The task was failed
+    FAILED_SILENT = 2 # The task was failed, but do not send a message yet
+
+async def fail_item(task: str, reason: str) -> tuple[Decision, dict]:
     # Allows up to 3 retries before moving item to the `error` table and sending details to IRC
-    raise NotImplementedError()
+    conn = await r.connect()
+    try:
+        job = await r.db("twitch").table("todo").get(task).run(conn)
+        tries = job.get("try", 0) + 1
+        error_reasons = job.get("errorReasons", []) + [reason]
+        if tries >= 3:
+            await wrap_db_result(r.db("twitch").table("todo").get(task).update({
+                "try": tries,
+                "status": "error",
+                "errorReasons": error_reasons
+            }).run(conn))
+            if parent := job.get("queued_for_item"):
+                if (await get_item_children(parent, lambda j : j['status'] != "done"))[0]:
+                    return Decision.FAILED_SILENT, job
+            return Decision.FAILED, job
+        else:
+            await wrap_db_result(r.db("twitch").table("todo").get(task).update({
+                "try": tries,
+                "errorReasons": error_reasons,
+                "status": "todo"
+            }).run(conn))
+            return Decision.RETRIED, job
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
 
 async def task_disconnected(cid, id):
     # Fail the item
-    await task_disconnected(id, "Client disconnected")
+    await fail_item(id, "Client disconnected")
 
 async def _get_item(conn, queue: str):
     result = await r.db("twitch").table("todo").get_all(queue, index="status").sample(1) \
@@ -155,6 +187,9 @@ async def get_item_children(ident: str, filter=(lambda _ : True)) -> tuple[list[
         items, errors = [], []
         async for item in r.db("twitch").table("todo").get_all(ident, index="queued_for_item").run(conn):
             if filter(item):
+                if item['status'] == "error":
+                    errors.append(item)
+                    continue
                 items.append(item)
         async for item in r.db("twitch").table("error").get_all(ident, index="queued_for_item").run(conn):
             item['status'] = "error"

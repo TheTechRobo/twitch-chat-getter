@@ -5,8 +5,7 @@ __all__ = ["HANDLER_FUNCTIONS"]
 
 import json, typing, functools
 
-from server.common.irc import try_upload_file
-
+from common.irc import try_upload_file
 from .shared import *
 from .db import *
 from . import irc

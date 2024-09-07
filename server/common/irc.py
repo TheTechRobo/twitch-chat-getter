@@ -44,6 +44,11 @@ class IrcBot:
             logging.info(f"Try {tries}. Waiting {delay}s before reconnecting")
             await asyncio.sleep(delay)
 
+    async def fail_item(self, item, reason):
+        verdict, job = await fail_item(item, reason)
+        if verdict == Decision.FAILED:
+            await self.send_message(f"{job['started_by']}: Your job {job['id']} for {job['item']} failed. Use !status {job['id']} for details.")
+
 AIOHTTP_SESSION = None
 
 async def try_upload_file(url: str, data: str):
