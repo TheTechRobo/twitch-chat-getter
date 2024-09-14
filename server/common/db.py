@@ -14,11 +14,11 @@ __all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "regi
 QUEUES = ["todo"]
 
 class Decision(enum.Enum):
-    RETRIED       = 0 # The task was requeued
-    FAILED        = 1 # The task was failed
-    FAILED_SILENT = 2 # The task was failed, but do not send a message yet
+    RETRIED         = 0 # The task was requeued
+    FAILED          = 1 # The task was failed
+    FAILED_FINISHED = 2 # The task was failed, and the parent is attached
 
-async def fail_item(task: str, reason: str) -> tuple[Decision, dict]:
+async def fail_item(task: str, reason: str) -> tuple[Decision, typing.Union[dict, tuple[dict, dict]]]:
     # Allows up to 3 retries before moving item to the `error` table and sending details to IRC
     conn = await r.connect()
     try:
@@ -33,7 +33,8 @@ async def fail_item(task: str, reason: str) -> tuple[Decision, dict]:
             }).run(conn))
             if parent := job.get("queued_for_item"):
                 if (await get_item_children(parent, lambda j : j['status'] != "done"))[0]:
-                    return Decision.FAILED_SILENT, job
+                    return Decision.FAILED, job
+                return Decision.FAILED_FINISHED, (job, await get_item(parent))
             return Decision.FAILED, job
         else:
             await wrap_db_result(r.db("twitch").table("todo").get(task).update({

@@ -44,10 +44,22 @@ class IrcBot:
             logging.info(f"Try {tries}. Waiting {delay}s before reconnecting")
             await asyncio.sleep(delay)
 
+    @staticmethod
+    async def prettify_item(item: str) -> str:
+        return f"https://twitch.tv/{item}" if item.startswith("c") else f"https://twitch.tv/videos/{item}"
+
     async def fail_item(self, item, reason):
         verdict, job = await fail_item(item, reason)
+        parent = None
+        if verdict == Decision.FAILED_FINISHED:
+            job, parent = job
+        assert isinstance(job, dict)
         if verdict == Decision.FAILED:
-            await self.send_message(f"{job['started_by']}: Your job {job['id']} for {job['item']} failed. Use !status {job['id']} for details.")
+            job['item'] = await self.prettify_item(job['item'])
+            await self.send_message(f"{job['started_by']}: Your job for {job['item']} failed. Use !status {job['id']} for details.")
+        if parent:
+            parent['item'] = await self.prettify_item(parent['item'])
+            await self.send_message(f"{parent['started_by']}: Your job for {parent['item']} failed. Use !status {parent['id']} for details.")
 
 AIOHTTP_SESSION = None
 

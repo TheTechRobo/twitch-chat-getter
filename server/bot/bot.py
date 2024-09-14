@@ -12,6 +12,7 @@ class Command:
         self.match = match
         self.runner = r
         self.required_modes = required_modes
+        self.help = self.runner.__doc__
 
     async def __call__(self: "Command", bot, user, ran, *args):
         if modes := self.required_modes:
@@ -65,6 +66,22 @@ class Bot:
             return cmd
         raise ValueError("first arg must be function or match")
 
+    def lookup_command(self, command: str):
+        for runner in self.commands:
+            if isinstance(runner.match, Prefix):
+                if command.startswith(runner.match):
+                    return runner
+            elif isinstance(runner.match, str):
+                if command == runner.match:
+                    return runner
+            elif type(runner.match) == set:
+                for match in runner.match:
+                    if command == match:
+                        return runner
+            else:
+                # theoretically unreachable
+                raise AssertionError("Task failed spectacularly.")
+
     async def parse_irc_line(self, line: dict):
         command = line['command']
         if command == "PRIVMSG":
@@ -76,32 +93,22 @@ class Bot:
             args = message.split(" ")
             mtime = arrow.Arrow.fromtimestamp(line['time']).format()
             print(f"[{mtime}] <{author}> {message}")
-            for runner in self.commands:
-                if isinstance(runner.match, Prefix):
-                    if not args[0].startswith(runner.match):
-                        continue
-                elif isinstance(runner.match, str):
-                    if args[0] != runner.match:
-                        continue
-                elif type(runner.match) == set:
-                    for match in runner.match:
-                        if args[0] != match:
-                            continue
-                else:
-                    await self.irc.reply(user['nick'], "Task failed spectacularly.")
-                if args:
-                    args_ = args[1:]
-                else:
-                    args_ = []
+            runner = self.lookup_command(args[0])
+            if runner:
                 try:
-                    async for message in runner(self, user, args[0], *args_):
+                    async for message in runner(self, user, args[0], *args[1:]):
                         await self.irc.reply(user['nick'], message)
                 except Exception:
                     await self.irc.reply(author, "An error occured while processing the command")
+                    print("Error while processing command:")
                     traceback.print_exc()
 
     async def run_forever(self):
         await self.irc.reply("", "Bot loaded.")
         async for line in self.irc:
-            await self.parse_irc_line(json.loads(line))
+            try:
+                await self.parse_irc_line(json.loads(line))
+            except Exception:
+                print("An error occured:")
+                traceback.print_exc()
 

@@ -3,6 +3,8 @@ import os
 import re
 import time
 import typing
+import random
+
 from common.irc import try_upload_file
 import common.db as db
 from .bot import Bot, Prefix
@@ -76,7 +78,7 @@ async def generate_status_message(job: str) -> list[str]:
     return messages
 
 @bot.command("!status")
-async def status(self, user, ran, *jobs):
+async def status(self: Bot, user, ran, *jobs):
     """
     Gets the number of jobs in each queue, or the current status of a job.
     Examples:
@@ -100,5 +102,44 @@ async def status(self, user, ran, *jobs):
         return
     data = await db.get_queue_status()
     yield f"{data['todo']} jobs in todo, {data['claims']} jobs in claims."
+
+@bot.command("!sutats")
+async def sutats(self: Bot, user, ran, *args):
+    async for message in status(self, user, ran, *args):
+        yield message[::-1] # Don't ask. I don't know either.
+
+@bot.command(Prefix("!s"))
+async def stauts(self: Bot, user, ran, *args):
+    async for message in status(self, user, ran, *args):
+        yield "".join(random.sample(list(message), len(message)))
+
+@bot.command("!help")
+async def help(self: Bot, user, ran, command=None):
+    if command:
+        if not command.startswith("!"):
+            command = "!" + command
+        runner = self.lookup_command(command)
+        if not runner or not runner.help:
+            yield "N̸͖͂o̸̢̢͑̾ͅ ̵͎̒̕͝h̸͖͎͖̺͂ě̶̢͈̥̄l̶̡̩̣̊p̸̧̠͍̖̃̐̽͝ ̷̭̟̀͛̆́f̷̣̀̎o̶̖̮͑͛͜r̶̫͋̂̏̚ ̷͉̼̪́̕ÿ̸̟̺̻̙́ǫ̵̫̱̥̉̽ū̴͎̤̹͆̔̈.̴̢̯̜̥͋͝.̶̢̖̪̈́͝.̶̲͔̹̉"
+            return
+        for line in runner.help.split("\n"):
+            line = line.strip()
+            if line:
+                yield line
+        if random.randint(0, 50) == 42:
+            yield "fireonlive is awesome"
+        return
+    text = ("List of commands:",
+            "!status <IDENTIFIER> [IDENTIFIERS...]: Returns the status of the given job(s) (e.g. !status 1319f607-38e6-4210-a3ed-4a540424a6fb). Does not currently work with URLs.",
+            "!status: Returns the list of jobs in each queue.",
+            "!a <URL> [EXPLANATION]: Archives the metadata of a twitch VOD or channel by its URL, saving the explanation into the database.",
+            "Be sure to provide explanations for your jobs, and remember that everything queued here takes up space on IA.",
+            "Please note that when a channel is queued here, only the metadata of the VODs will be saved, excluding clips and other channel content. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )",
+            "Also, archiving in bulk with transfer.archivete.am URLs works. This also applies to !status.",
+            "You can find the data on IA here: https://archive.org/details/archiveteam_twitch_metadata")
+    for line in text:
+        line = line.strip()
+        if line:
+            yield line
 
 asyncio.run(main())
