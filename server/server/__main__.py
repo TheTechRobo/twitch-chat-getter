@@ -1,5 +1,6 @@
 import asyncio, json, traceback, os
 import typing, random, signal
+import warnings as _ # allows tracemalloc to show unclosed sockets; export PYTHONTRACEMALLOC=<a value> to enable
 
 from .shared import *
 from .connection import *

@@ -94,6 +94,11 @@ class Connection:
                 return await self.run(expr, tries-1)
             self.error(f"Error occured while querying DB ({repr(e)}), giving up")
             raise
+        finally:
+            try:
+                await conn.close()
+            except Exception:
+                pass
 
     async def send_response(self, response, data={}):
         """
