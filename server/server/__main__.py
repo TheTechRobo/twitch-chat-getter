@@ -35,7 +35,7 @@ async def connectionHandlerWrapper(websocket: websockets.WebSocketServerProtocol
         logger.error(repr(traceback.format_exc()))
         if task := conn.ctask:
             logger.info(f"Failing item {task} because {cid} disconnected")
-            await taskDisconnected(cid, task)
+            await task_disconnected(cid, task)
         await websocket.close(1011, "Internal Server Error")
         raise
     logger.info("Connection {cid} finished")
