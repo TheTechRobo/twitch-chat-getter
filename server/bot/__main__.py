@@ -59,7 +59,7 @@ async def generate_status_message(job: str) -> list[str]:
             item = f"https://twitch.tv/{detail['item'][1:]}"
         else:
             item = f"https://twitch.tv/videos/{detail['item']}"
-        message = f"Job {detail['id']} is in {detail['status']}. It scraped {item}."
+        message = f"Job {detail['id']} (for {item}) is in {detail['status']}. "
         message += f"Queued {arrow.get(detail['queued_at'])}"
         if finished_ts := detail.get("finished_at"):
             message += f"; finished at {arrow.get(finished_ts)}"
@@ -73,7 +73,13 @@ async def generate_status_message(job: str) -> list[str]:
         if expires := detail.get("expires"):
             tense = "Expires" if expires > time.time() else "Expired"
             ts = arrow.get(expires).humanize(granularity=["hour", "minute"])
-            message += "{tense} {ts}."
+            message += f"{tense} {ts}. "
+        if detail.get("try", 0) != 0:
+            if detail['status'] == "error":
+                message += f"Tried {detail['try']} times before failing. "
+            else:
+                message += f"Attempt {detail['try'] + 1}. "
+            message += f"Last error: {repr(detail['errorReasons'][-1])}"
         messages.append(message)
     return messages
 
@@ -98,6 +104,8 @@ async def status(self: Bot, user, ran, *jobs):
             if len(msg) > 1:
                 u = await try_upload_file("https://transfer.archivete.am/btt-bulk-job-status", "\n".join(msg)+"\n")
                 msg = f"There are multiple messages for {job}, so go here: {u}"
+            else:
+                msg = msg[0]
             yield msg
         return
     data = await db.get_queue_status()
@@ -120,7 +128,7 @@ async def help(self: Bot, user, ran, command=None):
             command = "!" + command
         runner = self.lookup_command(command)
         if not runner or not runner.help:
-            yield "N̸͖͂o̸̢̢͑̾ͅ ̵͎̒̕͝h̸͖͎͖̺͂ě̶̢͈̥̄l̶̡̩̣̊p̸̧̠͍̖̃̐̽͝ ̷̭̟̀͛̆́f̷̣̀̎o̶̖̮͑͛͜r̶̫͋̂̏̚ ̷͉̼̪́̕ÿ̸̟̺̻̙́ǫ̵̫̱̥̉̽ū̴͎̤̹͆̔̈.̴̢̯̜̥͋͝.̶̢̖̪̈́͝.̶̲͔̹̉"
+            yield f"{command} does not exist or is undocumented."
             return
         for line in runner.help.split("\n"):
             line = line.strip()

@@ -3,12 +3,14 @@
 
 __all__ = ["HANDLER_FUNCTIONS"]
 
-import json, typing, functools
+import json, typing, functools, os.path, os
 
 from common.irc import try_upload_file
 from .shared import *
 from .db import *
 from . import irc
+
+UPLOAD_URL = os.environ['TARGET_URL']
 
 if typing.TYPE_CHECKING:
     # Circular imports are fun
@@ -98,4 +100,15 @@ async def submit_to_backfeed(self: "Connection", msg: dict):
     if ids:
         await irc.reply(user, f"Queued {len(ids)} discovered items from item {item_for}.")
     await self.send_response("ok")
+
+@handler(states=ConnectionState.TASK, name="error")
+async def error(self: "Connection", msg: dict):
+    id = msg['id']
+    reason = msg['reason']
+    await irc.fail_item(id, f"*{reason}")
+    self.ctask = None
+
+@handler(states=ConnectionState.TASK, name="upload")
+async def negotiate(self: "Connection", _msg: dict):
+    await self.send_response("upload", {"status": "ok", "url": UPLOAD_URL})
 

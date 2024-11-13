@@ -12,3 +12,5 @@ async def send_message(message: str):
 async def reply(author: str, message: str):
     await irc.reply(author, message)
 
+async def fail_item(item: str, reason: str):
+    await irc.fail_item(item, reason)

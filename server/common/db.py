@@ -51,7 +51,7 @@ async def fail_item(task: str, reason: str) -> tuple[Decision, typing.Union[dict
 
 async def task_disconnected(cid, id):
     # Fail the item
-    await fail_item(id, "Client disconnected")
+    await fail_item(id, f"Client({cid}) disconnected")
 
 async def _get_item(conn, queue: str):
     result = await r.db("twitch").table("todo").get_all(queue, index="status").sample(1) \
@@ -88,6 +88,8 @@ async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[
     try:
         previous_runs = r.db("twitch").table("todo").get_all(item, index="item").order_by(index=r.desc("expires")).run(conn)
         async for run in previous_runs:
+            if run['status'] == "error":
+                continue
             if item[0] != 'c':
                 # Not a channel
                 raise QueuingError(f"Item has already been run; please try !status {run['id']}")
@@ -97,7 +99,6 @@ async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[
             if run.get("expires", 0) and run['expires'] > time.time():
                 # Not expired
                 raise QueuingError(f"Item has not yet expired; please try !status {run['id']}")
-            break # only look at the first one
         entry = {
             "item": item,
             "started_by": user,
@@ -122,7 +123,7 @@ async def wrap_db_result(result):
     assert not (await result)['errors']
 
 async def register_backfeed(item: str, parent_item: str):
-    conn = r.connect()
+    conn = await r.connect()
     try:
         await wrap_db_result(r.db("twitch").table("ctx").insert(
             {"type": "backfeed", "item": item, "parent_item": parent_item}
@@ -186,13 +187,13 @@ async def get_item_children(ident: str, filter=(lambda _ : True)) -> tuple[list[
     conn = await r.connect()
     try:
         items, errors = [], []
-        async for item in r.db("twitch").table("todo").get_all(ident, index="queued_for_item").run(conn):
+        async for item in await r.db("twitch").table("todo").get_all(ident, index="queued_for_item").run(conn):
             if filter(item):
                 if item['status'] == "error":
                     errors.append(item)
                     continue
                 items.append(item)
-        async for item in r.db("twitch").table("error").get_all(ident, index="queued_for_item").run(conn):
+        async for item in await r.db("twitch").table("error").get_all(ident, index="queued_for_item").run(conn):
             item['status'] = "error"
             if filter(item):
                 errors.append(item)

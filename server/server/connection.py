@@ -1,4 +1,5 @@
 import json
+import traceback
 import websockets, logging, asyncio, random
 
 from rethinkdb import r
@@ -137,7 +138,7 @@ class Connection:
                         continue
                     if self.state >= ConnectionState.AUTHED:
                         self.warning(f"Already authed, reauthenticating")
-                    self.info(f"Authenticating with {auth}")
+                    self.debug(f"Authenticating with {auth}")
                     result = await self.run(r.db("twitch").table("secrets").get(auth))
                     if result:
                         if result.get("kick"):
@@ -149,7 +150,7 @@ class Connection:
                             self.info("New web client just dropped")
                             self.state = ConnectionState.IGNORE
                             self.web = True
-                        self.info("Authentication accepted")
+                        self.debug("Authentication accepted")
                         self.state = ConnectionState.AUTHED
                     else:
                         self.warning("Access denied")
@@ -180,9 +181,14 @@ class Connection:
                     await self.sock.close(1008, "Container is out of date.")
 
                 commands = HANDLER_FUNCTIONS[self.state]
-                if command := commands[mtype]:
-                    print("Running handler", command.__name__)
-                    await command(self, data)
+                if command := commands.get(mtype):
+                    self.debug("Running handler " + command.__name__)
+                    try:
+                        await command(self, data)
+                    except Exception:
+                        await self.send_response("error", {"source": "exception"})
+                        self.error("Exception occured in handler, see:")
+                        self.error(json.dumps(traceback.format_exc()))
                 else:
                     self.warning(f"Message type {repr(mtype)} is not recognised in this context ({self.state})")
                     response = {"type": "response", "response": "error", "reason": "unrecognised_command", "seq": self.seq}
@@ -202,6 +208,6 @@ class Connection:
         finally:
             CONNECTIONS.remove(self)
             if task := self.ctask:
-                await taskDisconnected(self.id, task)
+                await task_disconnected(self.id, task)
             self.ctask = None
 

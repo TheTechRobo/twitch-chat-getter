@@ -86,7 +86,7 @@ async def main():
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     port = int(os.environ['WSPORT'])
-    async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16) as server:
+    async with websockets.serve(connectionHandlerWrapper, "", port, max_size=4*1024*1024, max_queue=16, ping_timeout=None) as server:
         await STOP_SERVER.wait()
         server.close(False) # check() would have already handled this
     print("! The server has shut down.")

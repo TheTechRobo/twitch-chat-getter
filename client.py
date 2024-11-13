@@ -1,3 +1,5 @@
+######### NOTE ######
+# REEnABLE PREVENT SIGINT ###
 """
    Copyright 2022-2023 TheTechRobo
 
@@ -37,14 +39,15 @@ def wait_on_exit():
 import websocket, json, os, subprocess, shutil, os, os.path, base64
 import hashlib, traceback, signal, collections, struct, hashlib, logging, fcntl
 import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
-import random
+import random, tempfile, tarfile
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
-assert DATA_DIR.startswith("/")
+assert DATA_DIR.startswith("/"), "DATA_DIR path must be absolute"
+MACHINE_NAME = os.environ['MACHINE_NAME']
 
-def open_and_wait(args, ws):
-    process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
+def open_and_wait(args, ws, *, also_write_to=None):
+    subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True, also_write_to=also_write_to)
 
 class ConnectionClosedCleanly(Exception):
     """
@@ -146,13 +149,14 @@ class Task:
 
 class PrepareDirectories(Task):
     def prepare_directories(self, ctx):
-        folder = os.path.join(DATA_DIR, f"{self.itemType}{self.item}{time.time()}.tmp")
-        subprocess.run([
-            "mkdir", "-p", folder
-        ]).check_returncode()
-        ctx['folder'] = folder
-
-        os.chdir(folder)
+        ctime = time.time()
+        ctx['start_time'] = ctime
+        temp_folder = tempfile.mkdtemp(suffix=f"{self.itemType}-{self.item}-{ctime}.tmp", dir=DATA_DIR)
+        crawl_folder = os.path.join(temp_folder, "crawl")
+        os.mkdir(crawl_folder)
+        ctx['root_folder'] = temp_folder
+        ctx['crawl_folder'] = crawl_folder
+        os.chdir(crawl_folder)
 
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         self.item, self.itemType = item, itemType
@@ -197,8 +201,8 @@ class DownloadData(Task):
             print("Nothing to kill")
             return
         subprocess.run([
-            shutil.which("kill"), f"-{sig}", str(pid)]
-        ).check_returncode()
+            shutil.which("kill"), f"-{sig}", str(pid)
+        ]).check_returncode()
         try:
             self.ws.ping()
         except Exception:
@@ -350,33 +354,15 @@ class DownloadData(Task):
                 raise
 
 class MoveFiles(Task):
-    def _move_vod(self, ctx):
-        with open(os.path.join(ctx['folder'], f"v{self.item}.info.json")) as f:
-            data = json.load(f)
-            channel = data['uploader_id']
+    def _move(self, ctx, channel):
         ctx['logfile'] = "Unavailable."
-        os.chdir(DATA_DIR)
-        subprocess.run([
-            "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
-        ], check=True)
-        newrpath = os.path.join(channel, self.item, str(time.time()))
-        newpath = os.path.join(DATA_DIR, newrpath)
-        os.rename(ctx['folder'], newpath)
-        ctx['final_relative_path'] = newrpath
-        ctx['final_path'] = newpath
-        ctx['channel'] = channel
-
-    def _move_channel(self, ctx):
-        channel = self.item
-        os.chdir(DATA_DIR)
-        subprocess.run([
-            "mkdir", "-p", os.path.join(DATA_DIR, channel)
-        ], check=True)
-        new_relative_path = os.path.join(channel, str(time.time()))
-        new_path = os.path.join(DATA_DIR, new_relative_path)
-        os.rename(ctx['folder'], new_path)
-        ctx['final_relative_path'] = new_relative_path
-        ctx['final_path'] = new_path
+        root = ctx['root_folder']
+        os.chdir(root)
+        new_path = str(time.time())
+        new_absolute_path = os.path.join(root, new_path)
+        os.rename(ctx['crawl_folder'], new_absolute_path)
+        ctx['final_relative_path'] = new_path
+        ctx['final_path'] = new_absolute_path
         ctx['channel'] = channel
 
     def run(self, item, itemType, author, id, full, queued_for, ctx):
@@ -384,9 +370,13 @@ class MoveFiles(Task):
         self.itemType = itemType
 
         if itemType == 'c':
-            self._move_channel(ctx)
+            channel = self.item
+            self._move(ctx, channel)
         elif itemType == 'v':
-            self._move_vod(ctx)
+            with open(os.path.join(ctx['crawl_folder'], f"v{self.item}.info.json")) as f:
+                data = json.load(f)
+                channel = data['uploader_id']
+            self._move(ctx, channel)
         else:
             raise ValueError("unsupported item type")
 
@@ -434,127 +424,42 @@ def run_warcprox_tail(stop, ws, id):
                 raise
             print(i, file=sys.stdout.old, end="")
 
-# TODO: Move this into another file
-# Source: https://stackoverflow.com/a/55648984/9654083
-def du(path):
-    if os.path.islink(path):
-        return (os.lstat(path).st_size, 0)
-    if os.path.isfile(path):
-        st = os.lstat(path)
-        return (st.st_size, st.st_blocks * 512)
-    apparent_total_bytes = 0
-    total_bytes = 0
-    have = []
-    for dirpath, dirnames, filenames in os.walk(path):
-        apparent_total_bytes += os.lstat(dirpath).st_size
-        total_bytes += os.lstat(dirpath).st_blocks * 512
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            if os.path.islink(fp):
-                apparent_total_bytes += os.lstat(fp).st_size
-                continue
-            st = os.lstat(fp)
-            if st.st_ino in have:
-                continue  # skip hardlinks which were already counted
-            have.append(st.st_ino)
-            apparent_total_bytes += st.st_size
-            total_bytes += st.st_blocks * 512
-        for d in dirnames:
-            dp = os.path.join(dirpath, d)
-            if os.path.islink(dp):
-                apparent_total_bytes += os.lstat(dp).st_size
-    return (apparent_total_bytes, total_bytes)
-
 class UploadData(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         ws = self.ws
-        path = ctx['final_path']
+        path = ctx['final_relative_path']
+        root = ctx['root_folder']
 
-        sha = hashlib.sha256()
-
-        ws.send(json.dumps({"type": "negotiate", "method": "chunk_size"}))
-        chunk_response = ws.get_next_message("negotiate")
-        # Maximum 2 MiB
-        chunk_size = max(chunk_response['result'], 2*1024*1024)
-        # Start takeoff
-        preflight_response = {"type":None}
-        while preflight_response['type'] != "mes":
-            ws.send(json.dumps({"type": "upload", "method": "preflight",
-                "approxSize": du(path)[1]}))
-            preflight_response = ws.get_next_message()
-            assert preflight_response['type'] in ("mes", "nak")
-            if preflight_response['type'] == "mes":
+        while True:
+            target_response = ws.send(json.dumps({"type": "upload"}))
+            if target_response['status'] == "ok":
+                url = target_response['url']
+                print(f"Received target URL {url}.")
                 break
-            print("Tracker is not ready to upload content.\n%s"
-                  % preflight_response)
-            print("Sleeping 30 seconds.")
+            print(f"No targets available. Sleeping 30 seconds. {target_response}")
             time.sleep(30)
 
-        data = subprocess.Popen(
-            ["tar", "-C", DATA_DIR, "-czv", ctx['final_relative_path']],
-            shell=False,
-            stdout=subprocess.PIPE
-        )
-        chunk_num = 0
-        while chunk := data.stdout.read(chunk_size):
-            sha.update(chunk)
-            status = None
-            encoded = base64.b85encode(chunk).decode("ascii")
-            while status != "successful":
-                ws.send(json.dumps({"type": "chunk", "data": encoded,
-                                    "size": chunk_size, "num": chunk_num}))
-                msg = get_next_message(ws)
-                assert msg['type'] in ("upload_ack", "upload_nak")
-                if msg['type'] == "upload_nak":
-                    status = "nak'd"
-                    print("NAK received. The server cannot handle this chunk."
-                         " Retrying in 30 seconds...")
-                    time.sleep(30)
-                elif msg['type'] == "upload_ack":
-                    assert msg['num'] == chunk_num
-                    status = "successful"
-                else:
-                    print("Unrecognised server response.\n%s" % msg)
-            chunk_num += 1
-        print("Submitted ALL data.")
-
-        sha = sha.hexdigest()
-        print("Hash:", sha)
-        ws.send(json.dumps({"type": "verify", "hash": {
-            "type": "sha256",
-            "payload": sha
-        }}))
-        assert get_next_message(ws, "verify_result")['res'] == "match"
-        print("Hash verified.")
-
-        ws.send(json.dumps({"type": "fin", "chan": ctx['channel']}))
-        get_next_message(ws, "fin_ack")
-
-        # TODO: Properly retry upload if it fails
-        current_status = None
-        while current_status != "FINISHED":
-            if current_status == "FAILED":
-                raise Exception("Upload FAILED according to server..")
-            ws.send(json.dumps({
-                "type": "upload_satuts"
-            }))
-            d = {"type": None}
-            while d['type'] != "upload_status":
-                d = ws.get_next_message()
-                assert d['type'] in ("upload_status", "upload_log"), f"Received Unrecognised Thing {d}"
-                if d['type'] == "upload_log":
-                    print("Recv'd(%d):" % 1 if d.get("exception") else 0, d['payload'], end="", flush=True)
-            if d['status'] != current_status:
-                current_status = d['status']
-                print(f"Item entered {current_status.upper()} status.")
-            time.sleep(2)
-
-        print("Upload confirmed on IA!")
+        fn = os.path.join(root, str(ctx['start_time']))
+        try:
+            with tarfile.open(fn, "x:") as tar:
+                tar.add(path)
+            open_and_wait([
+                shutil.which("bullseye-client"),
+                "--project", "burnthetwitch",
+                "--pipeline", "tar",
+                "--uploader", MACHINE_NAME,
+                "--base-url", url,
+                fn,
+                f"{itemType}:{item}"
+            ], ws, also_write_to=sys.stdout.old) # todo: make this unnecessary
+            assert False
+        finally:
+            os.remove(fn)
 
 class DeleteDirectories(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
-        shutil.rmtree(ctx['final_path'])
-        shutil.rmtree(os.path.join(DATA_DIR, ctx['channel']))
+        os.chdir(DATA_DIR)
+        shutil.rmtree(ctx['root_folder'])
 
 class Logger:
     def __init__(self, prefix, old):
@@ -584,11 +489,11 @@ class RedirectStdout(Task):
         # This is a really shitty solution, but I'd rather not have to change all the print statements.
         sys.stdout.ws = self.ws
         sys.stdout.item = id
-        logging.basicConfig(filename=os.path.join(ctx['folder'], "btt.log"), level=logging.DEBUG,
+        logging.basicConfig(filename=os.path.join(ctx['crawl_folder'], "btt.log"), level=logging.DEBUG,
                 format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)",
                 force=True
         )
-        ctx['logfile'] = os.path.join(ctx['folder'], "btt.log")
+        ctx['logfile'] = os.path.join(ctx['crawl_folder'], "btt.log")
         sys.stdout.LOG_STUFF = True
 
 sys.stdbak = sys.stdout
@@ -637,7 +542,7 @@ class Pipeline:
             except FileNotFoundError:
                 logfile = "Logfile not found. The file may have already been moved."
             try:
-                with open(os.path.join(ctx['folder'], "warcprox__log.log")) as file:
+                with open(os.path.join(ctx['crawl_folder'], "warcprox__log.log")) as file:
                     logfile += "\n\nWarcprox log:\n"
                     logfile += file.read()
             except FileNotFoundError:
@@ -713,11 +618,12 @@ def mainloop():
     rws.connect(os.environ["CONNECT"])
     ws = Websocket(rws)
     try:
-        welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
+        welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret, "name": MACHINE_NAME}))
     except ConnectionClosedCleanly as info:
         print(f"Connection didn't open ({info.code} {info.reason})")
         sys.exit(4)
     if welcome['response'] != "welcome":
+        print(welcome)
         raise RuntimeError("Server did not grant us a warm welcome")
     ws.ping()
     pipeline = Pipeline(
