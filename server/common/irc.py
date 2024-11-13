@@ -43,6 +43,7 @@ class IrcBot:
             delay = min(4*tries, 60)
             logging.info(f"Try {tries}. Waiting {delay}s before reconnecting")
             await asyncio.sleep(delay)
+            tries += 1
 
     @staticmethod
     async def prettify_item(item: str) -> str:

@@ -1,6 +1,5 @@
-import functools, inspect, json, traceback, enum
+import functools, inspect, json, traceback
 
-import aiohttp
 from common.irc import IrcBot
 
 import arrow
