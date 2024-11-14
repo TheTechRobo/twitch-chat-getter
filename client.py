@@ -151,6 +151,7 @@ class PrepareDirectories(Task):
     def prepare_directories(self, ctx):
         ctime = time.time()
         ctx['start_time'] = ctime
+        assert "/" not in self.item
         temp_folder = tempfile.mkdtemp(suffix=f"{self.itemType}-{self.item}-{ctime}.tmp", dir=DATA_DIR)
         crawl_folder = os.path.join(temp_folder, "crawl")
         os.mkdir(crawl_folder)
