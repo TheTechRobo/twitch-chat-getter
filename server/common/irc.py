@@ -62,6 +62,13 @@ class IrcBot:
             parent['item'] = await self.prettify_item(parent['item'])
             await self.send_message(f"{parent['started_by']}: Your job for {parent['item']} failed. Use !status {parent['id']} for details.")
 
+    async def finish_item(self, ident: str):
+        item, errors = await finish_item(ident)
+        if item:
+            it = await get_item(item)
+            with_errors = " with errors" if errors else ""
+            await self.send_message(f"{it['started_by']}: Your job {it['id']} for {await self.prettify_item(it['item'])} has finished{with_errors}.")
+
 AIOHTTP_SESSION = None
 
 async def try_upload_file(url: str, data: str):

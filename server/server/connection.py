@@ -196,7 +196,7 @@ class Connection:
                         self.error(json.dumps(traceback.format_exc()))
                 else:
                     self.warning(f"Message type {repr(mtype)} is not recognised in this context ({self.state})")
-                    response = {"type": "response", "response": "error", "reason": "unrecognised_command", "seq": self.seq}
+                    response = {"type": "response", "response": "error", "reason": "unrecognised_command", "command": mtype,"seq": self.seq}
                     await self.sock.send(json.dumps(response))
                     continue
 

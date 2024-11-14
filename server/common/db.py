@@ -1,4 +1,4 @@
-import asyncio, re, typing, time
+import re, typing, time
 import aiohttp
 from rethinkdb import r
 r.set_loop_type("asyncio")
@@ -6,7 +6,7 @@ r.set_loop_type("asyncio")
 from .log import logger
 import enum
 
-__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "register_backfeed", "Decision"]
+__all__ = ["fail_item", "task_disconnected", "request_item", "queue_item", "register_backfeed", "Decision", "get_item", "set_item_status", "finish_item"]
 
 # Queues earlier in this list will be drained before queues later in the list.
 # When an item fails and is retried, it is placed in the next queue.
@@ -53,6 +53,28 @@ async def task_disconnected(cid, id):
     # Fail the item
     await fail_item(id, f"Client({cid}) disconnected")
 
+async def finish_item(id: str):
+    """
+    Marks an item as finished.
+    Returns an ID if it should be announced that ID is finished. Also returns a bool if it finished with child errors.
+    Returns None if it should not be announced. The second value is undefined in this case.
+    NOTE: The return value may differ from the `id` parameter if there is a parent item.
+    """
+    item = await get_item(id)
+    others = []
+    rv = id
+    errors = []
+    if parent := item['queued_for_item']:
+        others, errors = await get_item_children(id, lambda j : j['status'] != "done")
+        if others:
+            # Still work-in-progress items
+            rv = None
+        else:
+            # All other items are done or errored
+            rv = parent
+    await set_item_status(id, "done")
+    return rv, bool(errors)
+
 async def _get_item(conn, queue: str):
     result = await r.db("twitch").table("todo").get_all(queue, index="status").sample(1) \
         .update({"status": "claims"}, return_changes=True).run(conn)
@@ -72,6 +94,19 @@ async def request_item():
             if item := await _get_item(conn, queue):
                 return item
         return None
+    finally:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+async def set_item_status(id: str, status: str):
+    conn = await r.connect()
+    try:
+        a = await wrap_db_result(
+            r.db("twitch").table("todo").get(id).update({"status": status}, return_changes=True).run(conn)
+        )
+        return a['changes'][0]['new_val']
     finally:
         try:
             await conn.close()
@@ -120,7 +155,9 @@ async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[
             pass
 
 async def wrap_db_result(result):
-    assert not (await result)['errors']
+    r = await result
+    assert not r['errors']
+    return r
 
 async def register_backfeed(item: str, parent_item: str):
     conn = await r.connect()

@@ -77,9 +77,12 @@ async def generate_status_message(job: str) -> list[str]:
         if detail.get("try", 0) != 0:
             if detail['status'] == "error":
                 message += f"Tried {detail['try']} times before failing. "
+                message += f"Last error: {repr(detail['errorReasons'][-1])}"
+            elif detail['status'] == "done":
+                message += "Finished in {detail['try']} attempts. "
             else:
                 message += f"Attempt {detail['try'] + 1}. "
-            message += f"Last error: {repr(detail['errorReasons'][-1])}"
+                message += f"Last error: {repr(detail['errorReasons'][-1])}"
         messages.append(message)
     return messages
 
@@ -107,9 +110,9 @@ async def status(self: Bot, user, ran, *jobs):
             else:
                 msg = msg[0]
             yield msg
-        return
-    data = await db.get_queue_status()
-    yield f"{data['todo']} jobs in todo, {data['claims']} jobs in claims."
+    else:
+        data = await db.get_queue_status()
+        yield f"{data['todo']} jobs in todo, {data['claims']} jobs in claims."
 
 @bot.command("!sutats")
 async def sutats(self: Bot, user, ran, *args):
@@ -142,7 +145,7 @@ async def help(self: Bot, user, ran, command=None):
             "!status: Returns the list of jobs in each queue.",
             "!a <URL> [EXPLANATION]: Archives the metadata of a twitch VOD or channel by its URL, saving the explanation into the database.",
             "Be sure to provide explanations for your jobs, and remember that everything queued here takes up space on IA.",
-            "Please note that when a channel is queued here, only the metadata of the VODs will be saved, excluding clips and other channel content. To test what will be archived, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )",
+            "Please note that when a channel is queued here, only the metadata of the VODs will be saved, excluding clips and other channel content. To test what will be discovered, use yt-dlp (relevant code: https://github.com/TheTechRobo/twitch-chat-getter/blob/4f11b65e394e2d2f94e7e8f6cb1ed451eeb99ca1/client.py#L138-L151 )",
             "Also, archiving in bulk with transfer.archivete.am URLs works. This also applies to !status.",
             "You can find the data on IA here: https://archive.org/details/archiveteam_twitch_metadata")
     for line in text:

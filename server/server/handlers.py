@@ -112,3 +112,12 @@ async def error(self: "Connection", msg: dict):
 async def negotiate(self: "Connection", _msg: dict):
     await self.send_response("upload", {"status": "ok", "url": UPLOAD_URL})
 
+@handler(states=ConnectionState.TASK, name="done")
+async def done(self: "Connection", msg: dict):
+    assert self.ctask
+    assert msg['id'] == self.ctask
+    await irc.finish_item(self.ctask)
+    self.ctask = None
+    self.state = ConnectionState.READY
+    await self.send_response("ok")
+

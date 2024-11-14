@@ -14,3 +14,7 @@ async def reply(author: str, message: str):
 
 async def fail_item(item: str, reason: str):
     await irc.fail_item(item, reason)
+
+async def finish_item(ident: str):
+    await irc.finish_item(ident)
+

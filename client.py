@@ -452,7 +452,6 @@ class UploadData(Task):
                 fn,
                 f"{itemType}:{item}"
             ], ws, also_write_to=sys.stdout.old) # todo: make this unnecessary
-            assert False
         finally:
             os.remove(fn)
 
