@@ -78,7 +78,7 @@ AIOHTTP_SESSION = None
 async def try_upload_file(url: str, data: str):
     global AIOHTTP_SESSION
     if not AIOHTTP_SESSION:
-        AIOHTTP_SESSION = aiohttp.ClientSession(timeout=10)
+        AIOHTTP_SESSION = aiohttp.ClientSession()
     tries = 4
     attempts = 0
     while attempts < tries:

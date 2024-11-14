@@ -80,8 +80,8 @@ async def update_status(self: "Connection", msg: dict):
 @handler(states=ConnectionState.TASK, name="feed")
 async def submit_to_backfeed(self: "Connection", msg: dict):
     item = msg['item']
-    assert item == self.ctask
     item_for = msg['item_for']
+    assert item_for == self.ctask
     user = msg['person']
     reason = msg['reason']
     if " " in item or not item or not reason:

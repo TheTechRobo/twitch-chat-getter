@@ -121,8 +121,8 @@ class EmptyFileError(Exception): pass
 async def add_to_db(item: str, reason: str, user: str, expires: typing.Optional[int], parent_item: typing.Optional[str] = None):
     conn = await r.connect()
     try:
-        previous_runs = r.db("twitch").table("todo").get_all(item, index="item").order_by(index=r.desc("expires")).run(conn)
-        async for run in previous_runs:
+        previous_runs = await r.db("twitch").table("todo").get_all(item, index="item").order_by(r.desc("expires")).run(conn)
+        for run in previous_runs:
             if run['status'] == "error":
                 continue
             if item[0] != 'c':
@@ -177,7 +177,7 @@ CHANNEL_ID_REGEX = re.compile(r"^https?://w?w?w?\.?twitch\.tv/([\w]+)")
 async def queue_item(item: str, reason: str, user: str, parent_item: typing.Optional[str] = None):
     global AIOHTTP_SESSION
     if not AIOHTTP_SESSION:
-        AIOHTTP_SESSION = aiohttp.ClientSession(timeout=10)
+        AIOHTTP_SESSION = aiohttp.ClientSession()
     if re.search(r"^https?://transfer.archivete\.am/(?:inline/)?[^/]", item):
         ids, errors = [], []
         async with AIOHTTP_SESSION.get(item) as response:
