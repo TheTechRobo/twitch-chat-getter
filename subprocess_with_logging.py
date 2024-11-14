@@ -17,7 +17,7 @@ import subprocess
 _logger = logging.getLogger(__name__)
 
 
-def run_with_log(args=None, *, check = True, input = None, log_prefix = "", p=None, **kwargs):
+def run_with_log(args=None, *, check = True, input = None, log_prefix = '', p=None, also_write_to=None, **kwargs):
 	'''
 	Run a command using `subprocess.Popen(args, **kwargs)` and log all its std(out|err) output via `logging`.
 	`check` has the same semantics as on `subprocess.run`, i.e. raises an exception if the process exits non-zero.
@@ -27,10 +27,9 @@ def run_with_log(args=None, *, check = True, input = None, log_prefix = "", p=No
 	`p`, if specified, is an existing subprocess to act on. Ensure that stdout and stderr are piped!
 	Returns a tuple with the process's exit status, its stdout output, and its stderr output.
 	'''
-	if not args:
-		if not p:
-			raise ValueError("Either args or p must be specified")
-	badKwargs = {'stdin', 'stdout', 'stderr'}.intersection(set(kwargs))
+	if not args and not p:
+		raise ValueError('Either args or p must be specified')
+	badKwargs = {'stdin', 'stdout', 'stderr', 'also_write_to'}.intersection(set(kwargs))
 	if badKwargs:
 		raise ValueError(f'Disallowed kwargs: {", ".join(sorted(badKwargs))}')
 	_logger.info(f'{log_prefix}Running subprocess: {args!r}')
@@ -88,7 +87,9 @@ def run_with_log(args=None, *, check = True, input = None, log_prefix = "", p=No
 						continue
 					lines = lines[0].decode('utf-8').split('\n')
 					for line in lines:
-						_logger.info(f"{log_prefix}STDERR {line}")
+						_logger.info(f'{log_prefix}STDERR {line}')
+						if also_write_to:
+							also_write_to.write(line + '\n')
 				else:
 					stdout.append(data)
 					stdoutBuf += data
@@ -97,11 +98,19 @@ def run_with_log(args=None, *, check = True, input = None, log_prefix = "", p=No
 						continue
 					lines = lines[0].decode('utf-8').split('\n')
 					for line in lines:
-						_logger.info(f"{log_prefix}STDOUT {line}")
+						_logger.info(f'{log_prefix}STDOUT {line}')
+						if also_write_to:
+							also_write_to.write(line + '\n')
 	if stderrBuf:
-		_logger.info(f"{log_prefix}RemaindErr: {stderrBuf.decode('utf-8')}")
+		dec = stderrBuf.decode('utf-8')
+		_logger.info(f'{log_prefix}RemaindErr: {dec}')
+		if also_write_to:
+			also_write_to.write(dec)
 	if stdoutBuf:
-		_logger.info(f"{log_prefix}RemaindOut: {stdoutBuf.decode('utf-8')}")
+		dec = stdoutBuf.decode('utf-8')
+		_logger.info(f'{log_prefix}RemaindOut: {dec}')
+		if also_write_to:
+			also_write_to.write(dec)
 	p.wait()
 	assert p.poll() is not None
 	if input is not None and inputIsBytes and stdinOffset < len(input):

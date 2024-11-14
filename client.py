@@ -1,3 +1,5 @@
+######### NOTE ######
+# REEnABLE PREVENT SIGINT ###
 """
    Copyright 2022-2023 TheTechRobo
 
@@ -16,7 +18,7 @@
 
 # FIXME: Update this whenever you make a non-cosmetic change.
 # FIXME: It will be stored in the WARC file and sent to the tracker.
-VERSION = "20240719.01"
+VERSION = "20240728.01"
 
 import atexit, time, sys
 
@@ -31,19 +33,110 @@ print("It is now", time.time(), "o'clock.", flush=True)
 
 @atexit.register
 def wait_on_exit():
-    print("Waiting 20 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
-    time.sleep(20)
+    print("Waiting 15 seconds before exiting.\n\tFeel free to interrupt this, this is just so that broken machines dont drain the queue.")
+    time.sleep(15)
 
 import websocket, json, os, subprocess, shutil, os, os.path, base64
 import hashlib, traceback, signal, collections, struct, hashlib, logging, fcntl
 import requests, yt_dlp, prevent_sigint, subprocess_with_logging, threading, typing
+import random, tempfile, tarfile
 
 secret = os.environ['SECRET']
 DATA_DIR = os.environ['DATA_DIR']
-assert DATA_DIR.startswith("/")
+assert DATA_DIR.startswith("/"), "DATA_DIR path must be absolute"
+MACHINE_NAME = os.environ['MACHINE_NAME']
 
-def open_and_wait(args, ws):
-    process = subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True)
+def open_and_wait(args, ws, *, also_write_to=None):
+    subprocess_with_logging.run_with_log(args, shell=False, start_new_session=True, check=True, also_write_to=also_write_to)
+
+class ConnectionClosedCleanly(Exception):
+    """
+    Raised by _get_next_message when a close frame is sent.
+    """
+    def __init__(self, code, reason):
+        self.code = code
+        self.reason = reason
+
+class Websocket:
+    """
+    A wrapper for a websocket.
+    """
+    def __init__(self, ws):
+        self.ws = ws
+        self.seq = 0
+        self.seq_lock = threading.Lock()
+        atexit.register(self.close_then_shutdown)
+
+    def send(self, msg):
+        """
+        Sends a message, and returns the server's response.
+        """
+        with self.seq_lock:
+            self.seq += 1
+            seq = self.seq
+        msg = json.loads(msg)
+        msg['seq'] = seq
+        self.ws.send(json.dumps(msg))
+        return self._get_response(seq)
+
+    def send_unchecked(self, msg):
+        """
+        Sends a message that the server will not provide a response for.
+        """
+        self.ws.send(msg)
+
+    def _get_next_message(self, wanted_type=None, ok_close_connection=False):
+        data = {"type": "godot"}
+        while data['type'] == "godot":
+            opcode, data = self.ws.recv_data()
+            if opcode == 1:
+                data = json.loads(data)
+            elif opcode == 8:
+                code = struct.unpack("!H", data[:2])[0]
+                self.close(code)
+                raise ConnectionClosedCleanly(code, f"{data[2:].decode()}")
+            else:
+                print(f"Unknown opcode.\nData: {[opcode, data]}")
+                sys.exit(5)
+        if wanted_type:
+            assert data['type'] == wanted_type, f"Bad type for {data}."
+        return data
+
+    def get_next_message(self, wanted_type=None, ok_close_connection=False):
+        """
+        Gets a message. If wanted_type is set, an exception will be thrown if
+        the message does not match that type.
+        """
+        data = self._get_next_message(wanted_type, ok_close_connection)
+        if data['type'] == "response":
+            print(f"Received response: {data}")
+            raise RuntimeError("Unchecked response!")
+
+    def _get_response(self, seq):
+        data = self._get_next_message("response")
+        if seq != data['seq']:
+            print(f"Received mismatched response: {data}")
+            raise RuntimeError("Mismatched response!")
+        if data['response'] in {"error", "err"}:
+            print(f"Received error response: {data}")
+            raise RuntimeError("Received negative response!")
+        return data
+
+    def recv(self):
+        """
+        Receives one message.
+        """
+        return self.get_next_message()
+
+    def ping(self):
+        return self.ws.ping()
+
+    def close(self, status=1000, reason=b""):
+        return self.ws.close(status, reason)
+
+    def close_then_shutdown(self, status=1000, reason=b""):
+        self.close(status, reason)
+        self.ws.shutdown()
 
 class Task:
     def __init__(self, logger, ws):
@@ -56,13 +149,15 @@ class Task:
 
 class PrepareDirectories(Task):
     def prepare_directories(self, ctx):
-        folder = os.path.join(DATA_DIR, f"{self.itemType}{self.item}{time.time()}.tmp")
-        subprocess.run([
-            "mkdir", "-p", folder
-        ]).check_returncode()
-        ctx['folder'] = folder
-
-        os.chdir(folder)
+        ctime = time.time()
+        ctx['start_time'] = ctime
+        assert "/" not in self.item
+        temp_folder = tempfile.mkdtemp(suffix=f"{self.itemType}-{self.item}-{ctime}.tmp", dir=DATA_DIR)
+        crawl_folder = os.path.join(temp_folder, "crawl")
+        os.mkdir(crawl_folder)
+        ctx['root_folder'] = temp_folder
+        ctx['crawl_folder'] = crawl_folder
+        os.chdir(crawl_folder)
 
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         self.item, self.itemType = item, itemType
@@ -99,7 +194,7 @@ class DownloadData(Task):
         with open(__file__, "rb") as file:
             file_hash = hashlib.sha256(file.read()).hexdigest()
         assert requests.request("WARCPROX_WRITE_RECORD", f"http://localhost:{self.WARCPROX_PORT}/burnthetwitch_client_version", headers={"Content-Type": "text=plain;charset=utf-8", "WARC-Type": "resource"}, data="burnthetwitch client.py sha256:%s v:%s" % (file_hash, VERSION)).status_code == 204
-        self.ws.send(json.dumps({"type": "ping"}))
+        self.ws.ping()
 
     def _kill_warcprox(self, pid, sig="INT"):
         print("Terminating warcprox")
@@ -107,10 +202,10 @@ class DownloadData(Task):
             print("Nothing to kill")
             return
         subprocess.run([
-            shutil.which("kill"), f"-{sig}", str(pid)]
-        ).check_returncode()
+            shutil.which("kill"), f"-{sig}", str(pid)
+        ]).check_returncode()
         try:
-            self.ws.send('{"type": "ping"}')
+            self.ws.ping()
         except Exception:
             pass
 
@@ -158,7 +253,7 @@ class DownloadData(Task):
             ], ws)
         finally:
             del os.environ['CURL_CA_BUNDLE']
-        ws.send('{"type": "ping"}')
+        ws.ping()
 
     def _run_channel(self, item):
         proxy = "http://localhost:" + self.WARCPROX_PORT
@@ -260,33 +355,15 @@ class DownloadData(Task):
                 raise
 
 class MoveFiles(Task):
-    def _move_vod(self, ctx):
-        with open(os.path.join(ctx['folder'], f"v{self.item}.info.json")) as f:
-            data = json.load(f)
-            channel = data['uploader_id']
+    def _move(self, ctx, channel):
         ctx['logfile'] = "Unavailable."
-        os.chdir(DATA_DIR)
-        subprocess.run([
-            "mkdir", "-p", os.path.join(DATA_DIR, channel, self.item)
-        ], check=True)
-        newrpath = os.path.join(channel, self.item, str(time.time()))
-        newpath = os.path.join(DATA_DIR, newrpath)
-        os.rename(ctx['folder'], newpath)
-        ctx['final_relative_path'] = newrpath
-        ctx['final_path'] = newpath
-        ctx['channel'] = channel
-
-    def _move_channel(self, ctx):
-        channel = self.item
-        os.chdir(DATA_DIR)
-        subprocess.run([
-            "mkdir", "-p", os.path.join(DATA_DIR, channel)
-        ], check=True)
-        new_relative_path = os.path.join(channel, str(time.time()))
-        new_path = os.path.join(DATA_DIR, new_relative_path)
-        os.rename(ctx['folder'], new_path)
-        ctx['final_relative_path'] = new_relative_path
-        ctx['final_path'] = new_path
+        root = ctx['root_folder']
+        os.chdir(root)
+        new_path = str(time.time())
+        new_absolute_path = os.path.join(root, new_path)
+        os.rename(ctx['crawl_folder'], new_absolute_path)
+        ctx['final_relative_path'] = new_path
+        ctx['final_path'] = new_absolute_path
         ctx['channel'] = channel
 
     def run(self, item, itemType, author, id, full, queued_for, ctx):
@@ -294,9 +371,13 @@ class MoveFiles(Task):
         self.itemType = itemType
 
         if itemType == 'c':
-            self._move_channel(ctx)
+            channel = self.item
+            self._move(ctx, channel)
         elif itemType == 'v':
-            self._move_vod(ctx)
+            with open(os.path.join(ctx['crawl_folder'], f"v{self.item}.info.json")) as f:
+                data = json.load(f)
+                channel = data['uploader_id']
+            self._move(ctx, channel)
         else:
             raise ValueError("unsupported item type")
 
@@ -338,151 +419,47 @@ def run_warcprox_tail(stop, ws, id):
                 time.sleep(0.4)
                 continue
             try:
-                ws.send(json.dumps({"type": "WLOG", "data": i, "item": id}))
+                ws.send_unchecked(json.dumps({"type": "WLOG", "data": i, "item": id}))
             except Exception as ename:
                 print("Could not submit Warcprox Log, raising.", file=sys.stdout.old, flush=True)
                 raise
             print(i, file=sys.stdout.old, end="")
 
-def get_next_message(webSocket, wanted_type=None):
-    data = {"type": "godot"}
-    while data['type'] == "godot":
-        opcode, data = webSocket.recv_data()
-        if opcode == 1:
-            data = json.loads(data)
-        elif opcode == 8:
-            print("Server unexpectedly closed the conection.\nResponse: %s" % data)
-            sys.exit(4)
-        else:
-            print("Unknown opcode.\nData:" % [opcode, data])
-            sys.exit(5)
-    if wanted_type:
-        assert data['type'] == wanted_type, f"Bad type for {data}."
-    return data
-
-
-# TODO: Move this into another file
-# Source: https://stackoverflow.com/a/55648984/9654083
-def du(path):
-    if os.path.islink(path):
-        return (os.lstat(path).st_size, 0)
-    if os.path.isfile(path):
-        st = os.lstat(path)
-        return (st.st_size, st.st_blocks * 512)
-    apparent_total_bytes = 0
-    total_bytes = 0
-    have = []
-    for dirpath, dirnames, filenames in os.walk(path):
-        apparent_total_bytes += os.lstat(dirpath).st_size
-        total_bytes += os.lstat(dirpath).st_blocks * 512
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            if os.path.islink(fp):
-                apparent_total_bytes += os.lstat(fp).st_size
-                continue
-            st = os.lstat(fp)
-            if st.st_ino in have:
-                continue  # skip hardlinks which were already counted
-            have.append(st.st_ino)
-            apparent_total_bytes += st.st_size
-            total_bytes += st.st_blocks * 512
-        for d in dirnames:
-            dp = os.path.join(dirpath, d)
-            if os.path.islink(dp):
-                apparent_total_bytes += os.lstat(dp).st_size
-    return (apparent_total_bytes, total_bytes)
-
 class UploadData(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
         ws = self.ws
-        path = ctx['final_path']
+        path = ctx['final_relative_path']
+        root = ctx['root_folder']
 
-        sha = hashlib.sha256()
-
-        ws.send(json.dumps({"type": "negotiate", "method": "chunk_size"}))
-        chunk_response = get_next_message(ws, "negotiate")
-        # Maximum 2 MiB
-        chunk_size = max(chunk_response['result'], 2*1024*1024)
-        # Start takeoff
-        preflight_response = {"type":None}
-        while preflight_response['type'] != "mes":
-            ws.send(json.dumps({"type": "upload", "method": "preflight",
-                "approxSize": du(path)[1]}))
-            preflight_response = get_next_message(ws)
-            assert preflight_response['type'] in ("mes", "nak")
-            if preflight_response['type'] == "mes":
+        while True:
+            target_response = ws.send(json.dumps({"type": "upload"}))
+            if target_response['status'] == "ok":
+                url = target_response['url']
+                print(f"Received target URL {url}.")
                 break
-            print("Tracker is not ready to upload content.\n%s"
-                  % preflight_response)
-            print("Sleeping 30 seconds.")
+            print(f"No targets available. Sleeping 30 seconds. {target_response}")
             time.sleep(30)
 
-        data = subprocess.Popen(
-            ["tar", "-C", DATA_DIR, "-czv", ctx['final_relative_path']],
-            shell=False,
-            stdout=subprocess.PIPE
-        )
-        chunk_num = 0
-        while chunk := data.stdout.read(chunk_size):
-            sha.update(chunk)
-            status = None
-            encoded = base64.b85encode(chunk).decode("ascii")
-            while status != "successful":
-                ws.send(json.dumps({"type": "chunk", "data": encoded,
-                                    "size": chunk_size, "num": chunk_num}))
-                msg = get_next_message(ws)
-                assert msg['type'] in ("upload_ack", "upload_nak")
-                if msg['type'] == "upload_nak":
-                    status = "nak'd"
-                    print("NAK received. The server cannot handle this chunk."
-                         " Retrying in 30 seconds...")
-                    time.sleep(30)
-                elif msg['type'] == "upload_ack":
-                    assert msg['num'] == chunk_num
-                    status = "successful"
-                else:
-                    print("Unrecognised server response.\n%s" % msg)
-            chunk_num += 1
-        print("Submitted ALL data.")
-
-        sha = sha.hexdigest()
-        print("Hash:", sha)
-        ws.send(json.dumps({"type": "verify", "hash": {
-            "type": "sha256",
-            "payload": sha
-        }}))
-        assert get_next_message(ws, "verify_result")['res'] == "match"
-        print("Hash verified.")
-
-        ws.send(json.dumps({"type": "fin", "chan": ctx['channel']}))
-        get_next_message(ws, "fin_ack")
-
-        # TODO: Properly retry upload if it fails
-        current_status = None
-        while current_status != "FINISHED":
-            if current_status == "FAILED":
-                raise Exception("Upload FAILED according to server..")
-            ws.send(json.dumps({
-                "type": "upload_satuts"
-            }))
-            d = {"type": None}
-            while d['type'] != "upload_status":
-                d = get_next_message(ws)
-                assert d['type'] in ("upload_status", "upload_log"), f"Received Unrecognised Thing {d}"
-                if d['type'] == "upload_log":
-                    print("Recv'd(%d):" % 1 if d.get("exception") else 0, d['payload'], end="", flush=True)
-            if d['status'] != current_status:
-                current_status = d['status']
-                print(f"Item entered {current_status.upper()} status.")
-            ws.send(json.dumps({"type": "ping"}))
-            time.sleep(2)
-
-        print("Upload confirmed on IA!")
+        fn = os.path.join(root, str(ctx['start_time']))
+        try:
+            with tarfile.open(fn, "x:") as tar:
+                tar.add(path)
+            open_and_wait([
+                shutil.which("bullseye-client"),
+                "--project", "burnthetwitch",
+                "--pipeline", "tar",
+                "--uploader", MACHINE_NAME,
+                "--base-url", url,
+                fn,
+                f"{itemType}:{item}"
+            ], ws, also_write_to=sys.stdout.old) # todo: make this unnecessary
+        finally:
+            os.remove(fn)
 
 class DeleteDirectories(Task):
     def run(self, item, itemType, author, id, full, queued_for, ctx):
-        shutil.rmtree(ctx['final_path'])
-        shutil.rmtree(os.path.join(DATA_DIR, ctx['channel']))
+        os.chdir(DATA_DIR)
+        shutil.rmtree(ctx['root_folder'])
 
 class Logger:
     def __init__(self, prefix, old):
@@ -499,7 +476,7 @@ class Logger:
                 logging.info(f"{self.prefix} {message.rstrip()}")
             if self.ws:
                 try:
-                    self.ws.send(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
+                    self.ws.send_unchecked(json.dumps({"type": "WLOG", "data": f"{self.prefix} {message.rstrip()}", "item": self.item}))
                 except Exception:
                     print("Failed to post message to server.", file=self.old)
         print(message, file=self.old, end="")
@@ -512,11 +489,11 @@ class RedirectStdout(Task):
         # This is a really shitty solution, but I'd rather not have to change all the print statements.
         sys.stdout.ws = self.ws
         sys.stdout.item = id
-        logging.basicConfig(filename=os.path.join(ctx['folder'], "btt.log"), level=logging.DEBUG,
+        logging.basicConfig(filename=os.path.join(ctx['crawl_folder'], "btt.log"), level=logging.DEBUG,
                 format="[%(asctime)s] %(levelname)s %(message)s (%(lineno)d/%(funcName)s/%(filename)s)",
                 force=True
         )
-        ctx['logfile'] = os.path.join(ctx['folder'], "btt.log")
+        ctx['logfile'] = os.path.join(ctx['crawl_folder'], "btt.log")
         sys.stdout.LOG_STUFF = True
 
 sys.stdbak = sys.stdout
@@ -540,7 +517,7 @@ class Pipeline:
             self.tasks.append(task(print, ws))
 
     def _start(self, item, ws, author, ident, full, queuedFor):
-        ws.send(json.dumps({"type": "ping"}))
+        ws.ping()
         fullItem = item
         ctx = {}
         try:
@@ -553,7 +530,6 @@ class Pipeline:
                 ws.send(json.dumps({"type": "status", "task": cls.__name__, "id": ident}))
                 print(f"Starting {cls.__name__} for item {itemType}{item}")
                 task.run(item, itemType, author, ident, full, queuedFor, ctx)
-                ws.send(json.dumps({"type": "ping"}))
                 print(f"Finished {cls.__name__} for item {itemType}:{item}")
         except Exception:
             print("Caught exception!")
@@ -566,20 +542,18 @@ class Pipeline:
             except FileNotFoundError:
                 logfile = "Logfile not found. The file may have already been moved."
             try:
-                with open(os.path.join(ctx['folder'], "warcprox__log.log")) as file:
+                with open(os.path.join(ctx['crawl_folder'], "warcprox__log.log")) as file:
                     logfile += "\n\nWarcprox log:\n"
                     logfile += file.read()
             except FileNotFoundError:
                 logfile += "Warcprox logfile not found. The file may have already been moved."
 
-            class Dummy:
-                status_code = 0
-            resp = Dummy()
-            while resp.status_code != 200:
+            resp = None
+            while not resp or resp.status_code != 200:
                 resp = requests.put("https://transfer.archivete.am/traceback", data=f"{data}\n{os.getcwd()}\nLogs:\n{logfile}", timeout=120)
             url = resp.text.replace(".am/", ".am/inline/")
 
-            ws.send(json.dumps({
+            ws.send_unchecked(json.dumps({
                 "type": "error",
                 "item": fullItem,
                 "reason": f"Caught exception: {url}",
@@ -597,69 +571,42 @@ class Pipeline:
         """
         Wrapper to _start that defers SIGINT.
         """
-        with prevent_sigint.signal_fence(signal.SIGINT, on_deferred_signal=self._stuff):
-            return self._start(*args, **kwargs)
+        #with prevent_sigint.signal_fence(signal.SIGINT, on_deferred_signal=self._stuff):
+        return self._start(*args, **kwargs)
 
     @staticmethod
     def _stuff(*_args, **_kwargs):
         print("Stopping when current tasks are finished...")
 
-doNotRequestItem = False
-
-def updateWS(ws):
-    global doNotRequestItem # pylint: disable=global-statement
-    if not doNotRequestItem:
-        print("Requesting item")
-        ws.send(json.dumps({"type": "get"}))
-    opcode, data = ws.recv_data()
-    print(data)
-    if opcode == 1:
-        # Continue
-        pass
-    elif opcode == 8:
-        # unpack status code as network-endian (big endian) unsigned short
-        code = struct.unpack("!H", data[:2])[0]
-        print("Server responded with CLOSE frame.\n"
-                "Reason: %d %s" % (code, data[2:].decode()))
-        print("Connection closed by remote host.")
-        sys.exit(10)
-    else:
-        raise ValueError(f"Unsupported opcode sent from server: {opcode}")
-    item = data
-    _ = json.loads(item)
-    if type(_) == dict:
-        if _['type'] != "godot" and _['type'] != "item":
-            raise ValueError(f"Unexpected type {_}")
-        if _['type'] != "item":
-            doNotRequestItem = True # we already did - this is not the item
-            return
-        if _['type'] == "item":
-            item = _['item']
-            if not item:
-                message = "No items received."
-                if suppl := _.get("suppl"):
-                    if suppl == "NO_NEW_SERVES":
-                        message = "Items are not currently being served."
-                    elif suppl == "RATE_LIMITING":
-                        message = "Tracker ratelimiting is active. In order not to overload Twitch, we've limited the speed of item serves."
-                    elif suppl == "ERROR":
-                        message = "Tracker experienced an internal error."
-                    else:
-                        message = f"Server returned status {suppl}."
-                print(f"{message} Trying again in 15 seconds.")
-                time.sleep(15)
-                doNotRequestItem = False
-                return
-            author = _['started_by']
-            id = _['id']
-            queuedFor = _.get("queued_for_item")
-            doNotRequestItem = False
-    else:
-        print()
-        print("Item:", item)
-        raise ValueError("Bad server version?")
+def updateWS(ws: Websocket):
+    print("Requesting item")
+    try:
+        response = ws.send(json.dumps({"type": "get"}))
+    except ConnectionClosedCleanly as info:
+        print(f"Server closed connection.\nReason: {info.code} {info.reason}")
+        sys.exit(4)
+    print(response)
+    assert response['response'] == "item"
+    item = response['item']
+    if not item:
+        message = "No items received."
+        if suppl := response.get("suppl"):
+            if suppl == "NO_NEW_SERVES":
+                message = "Items are not currently being served."
+            elif suppl == "RATE_LIMITING":
+                message = "Tracker ratelimiting is active. In order not to overload Twitch, we've limited the speed of item serves."
+            elif suppl == "ERROR":
+                message = "Tracker experienced an internal error."
+            else:
+                message = f"Server returned status {suppl}."
+        print(f"{message} Trying again in 15 seconds.")
+        time.sleep(15)
+        return
+    author = response['started_by']
+    id = response['id']
+    queuedFor = response.get("queued_for_item")
     print(f"Got item {item} for author {author}")
-    pipeline.start(item, ws, author, id, data.decode("utf-8"), queuedFor)
+    pipeline.start(item, ws, author, id, response, queuedFor)
 
 pipeline = None
 
@@ -667,13 +614,18 @@ def mainloop():
     global pipeline # pylint: disable=global-statement
 
     # init
-    ws = websocket.WebSocket()
-    ws.connect(os.environ["CONNECT"])
-    ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret}))
-    ws.send(json.dumps({"type": "ping"}))
-    fj = ws.recv()
-    print(fj)
-    assert json.loads(fj)["type"] == "godot", "Incorrect server!"
+    rws = websocket.WebSocket()
+    rws.connect(os.environ["CONNECT"])
+    ws = Websocket(rws)
+    try:
+        welcome = ws.send(json.dumps({"type": "afternoon", "version": VERSION, "auth": secret, "name": MACHINE_NAME}))
+    except ConnectionClosedCleanly as info:
+        print(f"Connection didn't open ({info.code} {info.reason})")
+        sys.exit(4)
+    if welcome['response'] != "welcome":
+        print(welcome)
+        raise RuntimeError("Server did not grant us a warm welcome")
+    ws.ping()
     pipeline = Pipeline(
         ws,
         PrepareDirectories,

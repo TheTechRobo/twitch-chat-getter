@@ -4,9 +4,13 @@ __pycache__/
 run.sh
 runClient.sh
 runClientDebug.sh
+runServer.sh
+runIrcBot.sh
 rethinkdb.log
 we_haul.py
 test/
 btt_upl
 /.env
 Tmp1/
+nohup.out
+server.py.bak
