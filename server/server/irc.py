@@ -18,3 +18,6 @@ async def fail_item(item: str, reason: str):
 async def finish_item(ident: str):
     await irc.finish_item(ident)
 
+async def warn(ident: str, message: str):
+    await irc.warn_item(ident, message)
+

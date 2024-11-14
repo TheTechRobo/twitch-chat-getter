@@ -69,6 +69,10 @@ class IrcBot:
             with_errors = " with errors" if errors else ""
             await self.send_message(f"{it['started_by']}: Your job {it['id']} for {await self.prettify_item(it['item'])} has finished{with_errors}.")
 
+    async def warn_item(self, ident: str, message: str):
+        it = await get_item(ident)
+        await self.send_message(f"{it['started_by']}: A warning was emitted on item {ident}: {message}")
+
 AIOHTTP_SESSION = None
 
 async def try_upload_file(url: str, data: str):

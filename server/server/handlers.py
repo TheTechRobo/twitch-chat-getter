@@ -108,6 +108,11 @@ async def error(self: "Connection", msg: dict):
     await irc.fail_item(id, f"*{reason}")
     self.ctask = None
 
+@handler(states=ConnectionState.TASK, name="warn")
+async def warm(self: "Connection", msg: dict):
+    await irc.warn(self.ctask, msg['msg'])
+    await self.send_response("ok")
+
 @handler(states=ConnectionState.TASK, name="upload")
 async def negotiate(self: "Connection", _msg: dict):
     await self.send_response("upload", {"status": "ok", "url": UPLOAD_URL})
